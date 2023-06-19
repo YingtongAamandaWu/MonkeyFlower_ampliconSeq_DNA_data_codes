@@ -1,0 +1,513 @@
+---
+title: "20230320_diversity_analyses_bacteria_threshold=clam"
+author: "Wu"
+date: "2023-03-20"
+output: html_document
+note: tutorials-- https://userweb.eng.gla.ac.uk/umer.ijaz/projects/microbiomeSeq_Tutorial.html; https://rpubs.com/lconteville/713954; https://joey711.github.io/phyloseq/preprocess.html
+---
+
+save.image("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/diversity_analyses_bacteria.Rdata")
+
+# Load libraries
+```{r libraries}
+library(phyloseq)
+library(microbiomeSeq)
+library(vegan)
+library(ggplot2)
+library("DESeq2")
+library(microViz)
+#install.packages(
+#  devtools::install_github("david-barnett/microViz")
+library(microbiome) # BiocManager::install("microbiome")
+library(statmod) 
+library(tweedie)
+library(dplyr)
+library(lmPerm)
+library(rcompanion)
+library(ggside)
+library(dendextend)
+library(ComplexHeatmap)
+library(DESeq2)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(reprtree)
+library(data.table)
+library(openxlsx)
+library(xlsx)
+# devtools::install_github('araastat/reprtree')
+library(cforest)
+library(psadd)
+library(MicEco)
+
+# bacteria phyloseq object
+physeq.Bac<-readRDS("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/phyloseq.rds")
+
+colnames(physeq.Bac@sam_data)
+
+# add one column in physeq.Bac: the log bacteria CFUs
+sample_data(physeq.Bac)$log_Fcfu_corr<-log(sample_data(physeq.Bac)$Fcfu_corr+1) 
+
+table(physeq.Bac@sam_data$microbial_community)
+# Bacteria_dominated       Co_dominated    Fungi_dominated           Too_rare 
+#                167                 47                324                508 
+
+# notice the very uneven sample size, that's why we need to use permutational ANOVA for comparison
+
+# make a new column in meta data to combine microbial_community and biotic_inter
+table(physeq.Bac@sam_data$biotic_inter)
+#  No Yes 
+# 990  32 
+# examine if biotic_inter = Yes also means fungi_dominated
+physeq.Bac@sam_data$microbial_community[which(physeq.Bac@sam_data$biotic_inter=="Yes")] # no
+# exclude the three samples that are not fungi dominated 
+biotic_inter.index<-which(physeq.Bac@sam_data$biotic_inter=="Yes" & physeq.Bac@sam_data$microbial_community== "Fungi_dominated") 
+physeq.Bac@sam_data$microbial_community_biotic_inter<-physeq.Bac@sam_data$microbial_community
+physeq.Bac@sam_data$microbial_community_biotic_inter[biotic_inter.index]<-"Fungi_domin_long"
+physeq.Bac@sam_data$microbial_community_biotic_inter<-as.factor(physeq.Bac@sam_data$microbial_community_biotic_inter)
+
+physeq.Bac@sam_data$microbial_community_biotic_inter<-factor(physeq.Bac@sam_data$microbial_community_biotic_inter,
+                levels = c("Too_rare", "Co_dominated", "Bacteria_dominated", "Fungi_dominated", "Fungi_domin_long"))
+
+table(physeq.Bac@sam_data$microbial_community_biotic_inter)
+#  Too_rare       Co_dominated Bacteria_dominated    Fungi_dominated   Fungi_domin_long 
+#               508                 47                167                295                 29 
+
+# make sure that species names paste with genus names
+countSpaces <- function(s) { sapply(gregexpr(" ", s), function(p) { sum(p>=0) } ) }
+genuslack.index<- which(countSpaces(data.frame(physeq.Bac@tax_table@.Data)$Species)==0)
+# make full species column
+fullspecies<-data.frame(physeq.Bac@tax_table@.Data)$Species
+fullspecies[genuslack.index]<-paste(data.frame(physeq.Bac@tax_table@.Data)$Genus[genuslack.index], data.frame(physeq.Bac@tax_table@.Data)$Species[genuslack.index])
+which(countSpaces(fullspecies)==0) # check 
+
+newtaxtable<-data.frame(tax_table(physeq.Bac))
+newtaxtable$Species<-fullspecies
+tax_table(physeq.Bac)<-as.matrix(newtaxtable)
+
+# save 
+# saveRDS(physeq.Bac, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/phyloseq.rds")
+```
+
+# Rarefaction curves 
+```{r rarefaction}
+# to check if the sequencing depth is sufficient 
+
+# convert bacteria otu table to matrix 
+physeq.Bac.m <- otu_table(physeq.Bac)
+class(physeq.Bac.m) <- "matrix" # as.matrix() will do nothing
+## you get a warning here, but this is what we need to have
+physeq.Bac.m <- t(physeq.Bac.m)
+
+# produce rarefaction curve
+# tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/bacteria_rarefaction.tiff",width = 7, height = 7, unit="in",res = 600)
+rarecurve(physeq.Bac.m, step=30, cex=0.1)
+```
+
+# Alpha diversity 
+## alpha diversity estimates
+```{r alpha diversity estimates and patterns}
+# obtain the alpha diversity 
+physeq.Bac.alpha<-estimate_richness(physeq.Bac, measures=c("Observed", "InvSimpson", "Shannon", "Chao1"))
+physeq.Bac.alpha$Evenness<-physeq.Bac.alpha$Observed/log(physeq.Bac.alpha$Observed, base = exp(1)) # evenness
+
+# alpha_bac<-plot_anova_diversity(physeq.Bac,method =c("richness","simpson","shannon"),grouping_column="fungi_presence",pValueCutoff=0.05)
+# plotting and comparing alpha diversity of bacteria based on presence absence of fungi 
+```
+
+## patterns based on presence/absence of fungi
+```{r alpha diversity ANOVA and figures}
+# provide new column for fungi presence absence
+identical(rownames(physeq.Bac.alpha), rownames(as.data.frame(sample_data(physeq.Bac))))
+physeq.Bac.alpha<-cbind(physeq.Bac.alpha, 
+                        site = physeq.Bac@sam_data$site_ID,
+                        clam = physeq.Bac@sam_data$microbial_community,
+                        Fcfu_corr= as.data.frame(sample_data(physeq.Bac))$Fcfu_corr,
+                        log_Fcfu_corr = log(1+as.data.frame(sample_data(physeq.Bac))$Fcfu_corr))
+
+physeq.Bac.alpha$clam<-factor(physeq.Bac.alpha$clam, levels = c("Bacteria_dominated",  "Co_dominated", "Fungi_dominated","Too_rare"))
+
+# save physeq.Bac.alpha
+# write.csv(physeq.Bac.alpha,"C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/physeq.bacteria.alpha_diversity.csv")
+
+# ANOVA on effects of bacteria absence/presence on Shannon diversity:
+anova.shannon = aovp(Shannon ~ clam+site,physeq.Bac.alpha)
+summary(anova.shannon)
+#              Df R Sum Sq R Mean Sq Iter  Pr(Prob)    
+# clam1          3    13.41    4.4695 5000 < 2.2e-16 ***
+# site1         11   242.85   22.0774 5000 < 2.2e-16 ***
+# Residuals   1031   584.30    0.5667                
+
+# post-hoc test for pairwise comparison
+shannon.posthoc<-pairwisePermutationTest(Shannon ~ clam+site,physeq.Bac.alpha)
+
+# Save ANOVA results
+#write.table(as.data.frame(summary(anova.shannon)[[1]]),"C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/anova_Shannon_stats.csv", col.names=TRUE, sep=",")
+# write.table(shannon.posthoc, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/anova_Shannon_stats.csv", sep=",", append=TRUE)
+
+# Significance letter display
+cld<-cldList(p.adjust ~ Comparison,data = shannon.posthoc,threshold  = 0.05); rownames(cld)<-cld$Group
+
+community_colors <- c("Fungi_dominated" = "#FBD848", "Bacteria_dominated" = "#0f0e61", "Co_dominated"="#56c482", "Too_rare"="grey50")
+
+# Figure based on Shannon diversity in the presence/absence of bacteria
+shannon.clam.plot<-plot_richness(physeq.Bac, x="microbial_community", measures="Shannon", color = "microbial_community")+
+  geom_violin(alpha=0.6)+ 
+  theme(legend.position="none", axis.text.x=element_text(size=12,angle = 90))+
+  scale_color_manual(values = community_colors)+geom_boxplot(width=0.1)+
+  geom_text(data = NULL, x = 1, y = 4, label = cld$Letter[1], size = 6)+
+  geom_text(data = NULL, x = 2, y = 4, label = cld$Letter[2], size = 6)+
+  geom_text(data = NULL, x = 3, y = 4, label = cld$Letter[3], size = 6)+
+  geom_text(data = NULL, x = 4, y = 4, label = cld$Letter[4], size = 6)+ylim(0,4.5)
+
+
+# ANOVA on effects of bacteria absence/presence on observed richness:
+anova.observed = aovp(Observed ~ clam+site,physeq.Bac.alpha)
+summary(anova.observed)
+
+# post-hoc test for pairwise comparison
+observed.posthoc<-pairwisePermutationTest(Observed ~ clam+site,physeq.Bac.alpha)
+
+# Save ANOVA results
+#write.table(as.data.frame(summary(anova.observed)[[1]]),"C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/anova_observed_stats.csv", col.names=TRUE, sep=",")
+# write.table(observed.posthoc, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/anova_observed_stats.csv", sep=",", append=TRUE)
+
+
+# Significance letter display
+cld<-cldList(p.adjust ~ Comparison,data = observed.posthoc,threshold  = 0.05)
+cld
+
+# Figure based on observed diversity in the presence/absence of bacteria
+observed.clam.plot<-plot_richness(physeq.Bac, x="microbial_community", measures="Observed", color = "microbial_community")+
+  geom_violin(alpha=0.6)+ 
+  theme(legend.position="none", axis.text.x=element_text(size=12,angle = 90))+
+  scale_color_manual(values = community_colors)+geom_boxplot(width=0.1)+
+  geom_text(data = NULL, x = 1, y = 65, label = cld$Letter[1], size = 6)+
+  geom_text(data = NULL, x = 2, y = 65, label = cld$Letter[2], size = 6)+
+  geom_text(data = NULL, x = 3, y = 65, label = cld$Letter[3], size = 6)+
+  geom_text(data = NULL, x = 4, y = 65, label = cld$Letter[4], size = 6)+ylim(0,67)
+
+
+# ANOVA on effects of bacteria absence/presence on evenness richness:
+# first get rid of all the inf in evenness
+physeq.Bac.alpha2<-physeq.Bac.alpha
+physeq.Bac.alpha2<-physeq.Bac.alpha2[!is.infinite(physeq.Bac.alpha2$Evenness),]
+nrow(physeq.Bac.alpha2)# 970
+
+anova.evenness = aovp(Evenness ~ clam+site,physeq.Bac.alpha2)
+summary(anova.evenness)
+
+# post-hoc test for pairwise comparison
+evenness.posthoc<-pairwisePermutationTest(Evenness ~ clam+site,physeq.Bac.alpha2)
+
+# Save ANOVA results
+#write.table(as.data.frame(summary(anova.evenness)[[1]]),"C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/anova_evenness_stats.csv", col.names=TRUE, sep=",")
+# write.table(evenness.posthoc, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/anova_evenness_stats.csv", sep=",", append=TRUE)
+
+
+# Significance letter display
+cld<-cldList(p.adjust ~ Comparison,data = evenness.posthoc,threshold  = 0.05)
+cld
+
+# Figure based on evenness diversity in the presence/absence of bacteria
+evenness.clam.plot<-ggplot(aes(x = clam, y = Evenness, color = clam),data = physeq.Bac.alpha2)+
+  geom_violin(alpha = 0.6)+ 
+  theme(legend.position="none", axis.text.x=element_text(size=12,angle = 90))+
+  scale_color_manual(values = community_colors)+geom_boxplot(width=0.1)+
+  geom_text(data = NULL, x = 1, y = 16, label = cld$Letter[1], size = 6)+
+  geom_text(data = NULL, x = 2, y = 16, label = cld$Letter[2], size = 6)+
+  geom_text(data = NULL, x = 3, y = 16, label = cld$Letter[3], size = 6)+
+  geom_text(data = NULL, x = 4, y = 16, label = cld$Letter[4], size = 6)+ylim(0,19)
+
+# save the figures above
+#tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Shannon.clam.plot.tiff", width = 5, height = 5, res = 600, unit = "in")
+shannon.clam.plot+ theme_bw()+ theme(legend.position="none",strip.text.x = element_blank())
+dev.off()
+
+#tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/observed.clam.plot.tiff", width = 5, height = 5, res = 600, unit = "in")
+observed.clam.plot+theme_bw()+ theme(legend.position="none",strip.text.x = element_blank())
+dev.off()
+
+#tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/evenness.clam.plot.tiff", width = 5, height = 5, res = 600, unit = "in")
+evenness.clam.plot+theme_bw()+ theme(legend.position="none",strip.text.x = element_blank())
+dev.off()
+
+```
+
+## patterns based on FCFUs of fungi 
+```{r bacteria Shannon diversity ~ FCFU}
+# effects of fungi CFUs on Shannon diversity:
+FCFU.shannon = lm(Shannon~log_Fcfu_corr, data =physeq.Bac.alpha )
+summary(FCFU.shannon)
+##Coefficients:
+#              Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)    1.53130    0.03419  44.790   <2e-16 ***
+#log_Fcfu_corr -0.03171    0.01280  -2.478   0.0134 *  
+plot(y = physeq.Bac.alpha$Shannon , x=physeq.Bac.alpha$log_Fcfu_corr, data = physeq.Bac.alpha) # it does not seem to linear model is the best fit to the data 
+
+# correlation test 
+cor.test(y = physeq.Bac.alpha$Shannon , x=physeq.Bac.alpha$log_Fcfu_corr, method = "spearman")
+#data:  physeq.Bac.alpha$log_Fcfu_corr and physeq.Bac.alpha$Shannon
+#S = 208275431, p-value = 0.002921
+#alternative hypothesis: true rho is not equal to 0
+#sample estimates:
+#        rho 
+#-0.09192959 
+
+# Examine the distribution of y 
+hist(physeq.Bac.alpha$Shannon)
+
+# Use tweedie disdtribution to account for a mass of zeros (https://cran.r-project.org/web/packages/tweedie/tweedie.pdf); alternative method is glmmTMB (https://cran.r-project.org/web/packages/glmmTMB/vignettes/glmmTMB.pdf); SEE POST https://stats.stackexchange.com/questions/187824/how-to-model-non-negative-zero-inflated-continuous-data
+FCFU.shannon.tweedie <- glm(Shannon~log_Fcfu_corr, data= physeq.Bac.alpha, family=tweedie(link.power=0, var.power=2) )
+summary(FCFU.shannon.tweedie)
+#Coefficients:
+#               Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)    0.425357   0.023202  18.333   <2e-16 ***
+#log_Fcfu_corr -0.021260   0.008685  -2.448   0.0145 *  
+
+# ggplot
+Shannon_FCFU.plot<-ggplot(aes(y= Shannon , x= log_Fcfu_corr),data = physeq.Bac.alpha)+
+  geom_point(size = 1, alpha = 0.3)+theme_bw()+
+  geom_point(aes(x =physeq.Bac.alpha$log_Fcfu_corr ,y = FCFU.shannon.tweedie$fitted.values),color = "lightblue", alpha = 0.3) # tweedie distribution glm prediction
+
+#tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Shannon.FCFU.tiff", width = 5, height = 5, res = 600, unit = "in")
+Shannon_FCFU.plot
+#dev.off()
+```
+
+```{r bacteria Richness diversity ~ FCFU}
+# effects of fungi CFUs on Richness diversity:
+FCFU.Richness = lm(Observed~log_Fcfu_corr, data =physeq.Bac.alpha )
+summary(FCFU.Richness)
+#Coefficients:
+#              Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)    8.88283    0.33381   26.61   <2e-16 ***
+#log_Fcfu_corr -0.08619    0.12495   -0.69     0.49  
+plot(y = physeq.Bac.alpha$Observed , x=physeq.Bac.alpha$log_Fcfu_corr, data = physeq.Bac.alpha) # it does not seem to linear model is the best fit to the data 
+
+# correlation test 
+cor.test(y = physeq.Bac.alpha$Observed , x=physeq.Bac.alpha$log_Fcfu_corr, method = "spearman")
+#data:  physeq.Bac.alpha$log_Fcfu_corr and physeq.Bac.alpha$Observed
+#S = 205389297, p-value = 0.01297
+#alternative hypothesis: true rho is not equal to 0
+#sample estimates:
+#       rho 
+#-0.0767984 
+
+# Examine the distribution of y 
+hist(physeq.Bac.alpha$Observed)
+
+# Use gamma disdtribution to account for a mass of zeros
+FCFU.Richness.poisson<- glm(Observed~log_Fcfu_corr, data= physeq.Bac.alpha, family = poisson )
+summary(FCFU.Richness.poisson)
+#Coefficients:
+#               Estimate Std. Error z value Pr(>|z|)    
+#(Intercept)    2.184169   0.012783 170.859   <2e-16 ***
+#log_Fcfu_corr -0.009957   0.004868  -2.045   0.0408 * 
+
+# ggplot
+Richness_FCFU.plot<-ggplot(aes(y= Observed , x= log_Fcfu_corr),data = physeq.Bac.alpha)+
+  geom_point(size = 1, alpha = 0.3)+theme_bw()+
+  geom_point(aes(x =physeq.Bac.alpha$log_Fcfu_corr ,y = FCFU.Richness.poisson$fitted.values),color = "lightblue", alpha = 0.3) # tweedie distribution glm prediction
+
+#tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Richness.FCFU.tiff", width = 5, height = 5, res = 600, unit = "in")
+Richness_FCFU.plot
+#dev.off()
+```
+
+```{r bacteria Evenness diversity ~ FCFU}
+# effects of fungi CFUs on Evenness diversity:
+# first get rid of all the inf in evenness
+physeq.Bac.alpha2<-physeq.Bac.alpha[,c("Evenness","Fcfu_corr","log_Fcfu_corr")]
+physeq.Bac.alpha2<-physeq.Bac.alpha2[!is.infinite(physeq.Bac.alpha2$Evenness),]
+nrow(physeq.Bac.alpha2)# 848
+
+FCFU.Evenness = lm(Evenness~log_Fcfu_corr, data =physeq.Bac.alpha2 ,na.action=na.omit)
+summary(FCFU.Evenness)
+#Coefficients:
+#              Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)    4.11221    0.08388   49.02   <2e-16 ***
+#log_Fcfu_corr -0.01989    0.03157   -0.63    0.529 
+plot(y = physeq.Bac.alpha2$Evenness , x=physeq.Bac.alpha2$log_Fcfu_corr, data = physeq.Bac.alpha) # it does not seem to linear model is the best fit to the data 
+
+# correlation test 
+cor.test(y = physeq.Bac.alpha2$Evenness , x=physeq.Bac.alpha2$log_Fcfu_corr, method = "spearman")
+#data:  physeq.Bac.alpha2$log_Fcfu_corr and physeq.Bac.alpha2$Evenness
+#S = 162737637, p-value = 0.0296
+#alternative hypothesis: true rho is not equal to 0
+#sample estimates:
+#      rho 
+#-0.069854 
+
+# Examine the distribution of y 
+hist(physeq.Bac.alpha2$Evenness)
+
+# Use tweedie disdtribution to account for a mass of zeros (https://cran.r-project.org/web/packages/tweedie/tweedie.pdf); alternative method is glmmTMB (https://cran.r-project.org/web/packages/glmmTMB/vignettes/glmmTMB.pdf); SEE POST https://stats.stackexchange.com/questions/187824/how-to-model-non-negative-zero-inflated-continuous-data
+FCFU.Evenness.tweedie <- glm(Evenness~log_Fcfu_corr, data= physeq.Bac.alpha2, family=tweedie(link.power=0, var.power=2) )
+summary(FCFU.Evenness.tweedie)
+#Coefficients:
+#               Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)    1.413866   0.020581  68.699   <2e-16 ***
+#log_Fcfu_corr -0.004829   0.007745  -0.623    0.533  
+
+# ggplot
+Evenness_FCFU.plot<-ggplot(aes(y= Evenness , x= log_Fcfu_corr),data = physeq.Bac.alpha2)+
+  geom_point(size = 1, alpha = 0.3)+theme_bw()
+
+#tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Evenness.FCFU.tiff", width = 5, height = 5, res = 600, unit = "in")
+Evenness_FCFU.plot
+#dev.off()
+
+# save coefficient tables
+tablelocation<-"C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/FCFU_vs_bacteriadiversity_stats.csv"
+
+write.table(coef(summary(FCFU.Richness.poisson)), tablelocation, sep=",")
+
+write.table(coef(summary(FCFU.shannon.tweedie)), tablelocation, sep=",", append=TRUE)
+
+write.table(coef(summary(FCFU.Evenness.tweedie)),tablelocation, col.names=TRUE, sep=",", append=TRUE)
+
+```
+
+# Preprocsing and filter
+```{R preprocessing}
+
+# pre processing (https://joey711.github.io/phyloseq/preprocess.html)
+# Remove taxa not seen more than 3 times 
+physeq.Bacf = filter_taxa(physeq.Bac, function(x) sum(x) >3 , TRUE)
+physeq.Bacf
+#phyloseq-class experiment-level object
+#otu_table()   OTU Table:         [ 5398 taxa and 1046 samples ]
+#sample_data() Sample Data:       [ 1046 samples by 52 sample variables ]
+#tax_table()   Taxonomy Table:    [ 5398 taxa by 6 taxonomic ranks ]
+#phy_tree()    Phylogenetic Tree: [ 5398 tips and 5396 internal nodes ]
+
+#  remove samples with no reads.
+physeq.Bacf<-prune_samples(sample_sums(physeq.Bacf)>=1, physeq.Bacf)
+physeq.Bacf
+#phyloseq-class experiment-level object
+#otu_table()   OTU Table:         [ 5398 taxa and 988 samples ]
+#sample_data() Sample Data:       [ 988 samples by 52 sample variables ]
+#tax_table()   Taxonomy Table:    [ 5398 taxa by 6 taxonomic ranks ]
+#phy_tree()    Phylogenetic Tree: [ 5398 tips and 5396 internal nodes ]
+```
+
+## the main bacteria species/genus overview
+(https://david-barnett.github.io/microViz/)
+```{r}
+# subset phyloseq object based on presence absence of bacteria
+# physeq.Bacf.bac_ab<-subset_samples(physeq.Bacf, fungi_presence=="Absent")
+# physeq.Bacf.bac_pre<-subset_samples(physeq.Bacf, fungi_presence=="Present")
+
+# EXAMPLE visualization # https://david-barnett.github.io/microViz/articles/shao19-analyses.html
+tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Genus.barplot..tiff", width = 10, height = 10, res = 600, unit = "in")
+
+physeq.Bacf %>% 
+  comp_barplot("Genus", n_taxa = 30, merge_other = FALSE, label = NULL) +
+  coord_flip() +
+  ggtitle(
+    "Categories of microbial communities"
+    ) +
+  theme(axis.ticks.y = element_blank(), strip.text = element_text(face = "bold"))
+
+dev.off()
+
+```
+
+# Differential Abundance Analysis (DESeq2)
+## Differential Abundance Analysis (DESeq2) with presence / absence of Metschnikowia
+https://joey711.github.io/phyloseq-extensions/DESeq2.html
+```{r DESeq2 conversion and call}
+# add a pseudo-count value of '1' to data to remove zeros counts (https://www.biostars.org/p/440379/)
+physeq.Bacf.Met2<-physeq.Bacf.Met
+physeq.Bacf.Met2@otu_table<- as.matrix(physeq.Bacf.Met2@otu_table)+1
+
+Bac.deseq.Met = phyloseq_to_deseq2(physeq.Bacf.Met2, ~ Metschnikowia.presence)
+Bac.deseq.Met = DESeq(Bac.deseq.Met , test="Wald", fitType="parametric")
+
+# Investigate test results table
+# The following results function call creates a table of the results of the tests. Very fast. The hard work was already stored with the rest of the DESeq2-related data in our latest version of the diagdds object (see above). I then order by the adjusted p-value, removing the entries with an NA value. The rest of this example is just formatting the results table with taxonomic information for nice(ish) display in the HTML output.
+
+Bac.deseq.Met.res = results(Bac.deseq.Met, cooksCutoff = FALSE)
+alpha = 0.05
+Bac.deseq.Met.tab = Bac.deseq.Met.res[which(Bac.deseq.Met.res$padj < alpha), ]
+Bac.deseq.Met.tab = cbind(as(Bac.deseq.Met.tab, "data.frame"), as(tax_table(physeq.Bacf.Met)[rownames(Bac.deseq.Met.tab), ], "matrix"))
+genuslack<-which(!Bac.deseq.Met.tab$Species %like% " ")
+Bac.deseq.Met.tab$Species[genuslack]<-paste(Bac.deseq.Met.tab$Genus[genuslack], Bac.deseq.Met.tab$Species[genuslack])
+head(Bac.deseq.Met.tab)
+dim(Bac.deseq.Met.tab) # 26 ASVs
+
+# save the table
+# write.csv(Bac.deseq.Met.tab, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/Bac.DifferentialAbund.MetPresence.tab.csv")
+
+# Let's look at the OTUs that were significantly different between the two tissues. The following makes a nice ggplot2 summary of the results.
+
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+    scale_fill_brewer(palette = palname, ...)
+}
+# Genus order
+x = tapply(Bac.deseq.Met.tab$log2FoldChange, Bac.deseq.Met.tab$Genus, function(x) max(x))
+x = sort(x, TRUE)
+Bac.deseq.Met.tab$Genus = factor(as.character(Bac.deseq.Met.tab$Genus), levels=names(x))
+# Species order
+x = tapply(Bac.deseq.Met.tab$log2FoldChange, Bac.deseq.Met.tab$Species, function(x) max(x))
+x = sort(x, TRUE)
+Bac.deseq.Met.tab$Species = factor(as.character(Bac.deseq.Met.tab$Species), levels=names(x))
+
+# tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/Bac.DifferentialAbund.MetPresence.tiff", height = 10, width = 8, res = 600, unit = "in")
+
+ggplot(Bac.deseq.Met.tab, aes(x=Species, y=log2FoldChange, color=Genus)) + geom_point(size=6, alpha = 0.7) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5, size = 15), 
+        axis.text.y = element_text(size = 15),
+        legend.position = "none")
+
+
+```
+
+## Differential Abundance Analysis (DESeq2) comparing between fungi dominance vs bacteria domniance
+```{r DESeq2 conversion and call}
+
+physeq.Bacf.bacfun_domin<-ps_filter(physeq.Bacf.Met2, microbial_community== "Fungi_dominated"|microbial_community== "Bacteria_dominated")
+
+Bac.deseq.bacfun_domin = phyloseq_to_deseq2(physeq.Bacf.bacfun_domin, ~ microbial_community)
+Bac.deseq.bacfun_domin = DESeq(Bac.deseq.bacfun_domin , test="Wald", fitType="parametric")
+
+# Results:
+Bac.deseq.bacfun_domin.res = results(Bac.deseq.bacfun_domin, cooksCutoff = FALSE)
+alpha = 0.05
+Bac.deseq.bacfun_domin.tab = Bac.deseq.bacfun_domin.res[which(Bac.deseq.bacfun_domin.res$padj < alpha), ]
+Bac.deseq.bacfun_domin.tab = cbind(as(Bac.deseq.bacfun_domin.tab, "data.frame"), as(tax_table(physeq.Bacf.Met2)[rownames(Bac.deseq.bacfun_domin.tab), ], "matrix"))
+(Bac.deseq.bacfun_domin.tab$Species)
+genuslack<-which(!Bac.deseq.bacfun_domin.tab$Species %like% " ")
+Bac.deseq.bacfun_domin.tab$Species[genuslack]<-paste(Bac.deseq.bacfun_domin.tab$Genus[genuslack], Bac.deseq.bacfun_domin.tab$Species[genuslack])
+head(Bac.deseq.bacfun_domin.tab)
+dim(Bac.deseq.bacfun_domin.tab) # 56 ASVs
+
+# save the table
+# write.csv(Bac.deseq.bacfun_domin.tab, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Bac.DifferentialAbund.Fun_vs_Bac_domin.tab.csv")
+
+# Let's look at the OTUs that were significantly different between the two tissues. The following makes a nice ggplot2 summary of the results.
+
+theme_set(theme_bw())
+scale_fill_discrete <- function(palname = "Set1", ...) {
+    scale_fill_brewer(palette = palname, ...)
+}
+# Genus order
+x = tapply(Bac.deseq.bacfun_domin.tab$log2FoldChange, Bac.deseq.bacfun_domin.tab$Genus, function(x) max(x))
+x = sort(x, TRUE)
+Bac.deseq.bacfun_domin.tab$Genus = factor(as.character(Bac.deseq.bacfun_domin.tab$Genus), levels=names(x))
+# Species order
+x = tapply(Bac.deseq.bacfun_domin.tab$log2FoldChange, Bac.deseq.bacfun_domin.tab$Species, function(x) max(x))
+x = sort(x, TRUE)
+Bac.deseq.bacfun_domin.tab$Species = factor(as.character(Bac.deseq.bacfun_domin.tab$Species), levels=names(x))
+
+# tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/diversity_analyses_bacteria/diversity_analyses_bacteria_clam/Bac.DifferentialAbund.Fun_vs_Bac_domin.tiff", height = 10, width = 14, res = 600, unit = "in")
+
+ggplot(Bac.deseq.bacfun_domin.tab, aes(x=Species, y=log2FoldChange, color=Genus)) + geom_point(size=6, alpha = 0.7) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5, size = 15), 
+        axis.text.y = element_text(size = 15),
+        legend.position = "none")
+
+dev.off()
+```

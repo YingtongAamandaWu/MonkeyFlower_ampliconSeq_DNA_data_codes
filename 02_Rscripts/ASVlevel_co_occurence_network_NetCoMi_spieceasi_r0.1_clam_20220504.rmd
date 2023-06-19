@@ -1,0 +1,600 @@
+---
+title: "20230429_co_occurence_network_NetCoMi_speiceasi_r0.1_clam"
+author: "Wu"
+date: "2023-04-29"
+output: html_document
+---
+# Load libraries
+```{R}
+
+library(SpiecEasi)
+library(microbiome)
+library(NetCoMi)
+library(limma)
+library(psadd)
+library(data.table)
+library(dplyr)
+#library(microViz)
+library(openxlsx)
+library(xlsx)
+```
+
+
+# Read phyloseq data 
+```{r}
+# bacteria phyloseq object
+physeq.Bac<-readRDS("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/phyloseq.rds")
+# physeq.Bac<-readRDS("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/phyloseq.rds")
+physeq.Bac<-prune_samples(sample_sums(physeq.Bac)>=1, physeq.Bac) # prune samples with no reads
+
+# fungi phyloseq object
+physeq.Fun<-readRDS("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/phyloseq.rds")
+physeq.Fun<-prune_samples(sample_sums(physeq.Fun)>=1, physeq.Fun) # prune samples with no reads
+
+# raw counts of bac + fun combined 
+physeq.bac.fun<-readRDS( "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/make_phyloseq_objects/phyloseq.bac.fun_rawcounts.rds")
+
+# make a new column in meta data to combine microbial_community and biotic_inter
+table(physeq.bac.fun@sam_data$biotic_inter)
+#  No Yes 
+# 1030  32 
+# examine if biotic_inter = Yes also means fungi_dominated
+physeq.bac.fun@sam_data$microbial_community[which(physeq.bac.fun@sam_data$biotic_inter=="Yes")] # no
+# exclude the three samples that are not fungi dominated 
+biotic_inter.index<-which(physeq.bac.fun@sam_data$biotic_inter=="Yes" & physeq.bac.fun@sam_data$microbial_community== "Fungi_dominated") 
+physeq.bac.fun@sam_data$microbial_community_biotic_inter<-physeq.bac.fun@sam_data$microbial_community
+physeq.bac.fun@sam_data$microbial_community_biotic_inter[biotic_inter.index]<-"Fungi_domin_long"
+physeq.bac.fun@sam_data$microbial_community_biotic_inter<-as.factor(physeq.bac.fun@sam_data$microbial_community_biotic_inter)
+
+physeq.bac.fun@sam_data$microbial_community_biotic_inter<-factor(physeq.bac.fun@sam_data$microbial_community_biotic_inter,
+                levels = c("Too_rare", "Co_dominated", "Bacteria_dominated", "Fungi_dominated", "Fungi_domin_long"))
+
+table(physeq.bac.fun@sam_data$microbial_community_biotic_inter)
+#           Too_rare       Co_dominated Bacteria_dominated    Fungi_dominated   Fungi_domin_long 
+#                518                 48                169                298                 29 
+
+table(physeq.bac.fun@sam_data$microbial_community)
+#Bacteria_dominated       Co_dominated    Fungi_dominated           Too_rare 
+#               169                 48                327                518 
+               
+# saveRDS(physeq.bac.fun, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/make_phyloseq_objects/phyloseq.bac.fun_rawcounts.rds")
+```
+
+# Fungi co-occurrence network 
+## spieceasi_fungi_ASV level 
+```{r}
+physeq.Fun_fun.domin <- subset_samples_no_zero(physeq.Fun, microbial_community== "Fungi_dominated")
+physeq.Fun_bac.domin <- subset_samples_no_zero(physeq.Fun, microbial_community== "Bacteria_dominated")
+
+
+# 25% quantile of sample total reads
+quantile(colSums(physeq.Fun@otu_table),0.25) # 352 
+
+# construct network
+net_spieceasi.Fun.ASV<- netConstruct(physeq.Fun,
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 300),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 352),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #zeroMethod = "pseudoZO",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123456)
+                           
+                           
+# network analyzed
+props_net_spieceasi.Fun.ASV <- netAnalyze(net_spieceasi.Fun.ASV, clustMethod = "cluster_fast_greedy")
+
+# Plot 
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.pdf",  width = 8, height = 8)
+plot(props_net_spieceasi.Fun.ASV, 
+     nodeColor = "cluster", 
+     nodeSize = "clr",
+     title1 = "Network on ASV level with spieceasi correlations", 
+     showTitle = TRUE,
+    cexTitle = 1,      cexLabels = 3)
+
+legend(0.7, 1.1, cex = 1, title = "estimated correlation:", 
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+       bty = "n", horiz = TRUE)
+
+dev.off()
+```
+
+## spieceasi_fungi_ASV level_compare_fungi_dominated vs bacteria_dominated
+```{r}
+# Split the phyloseq object into two groups
+physeq.Fun_fun.domin <- subset_samples_no_zero(physeq.Fun, microbial_community== "Fungi_dominated")
+                                                   
+net_spieceasi.Fun.ASV.comp<- netConstruct(data=physeq.Fun_fun.domin, 
+                                      data2=physeq.Fun_bac.domin, 
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 100),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 352),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #zeroMethod = "pseudoZO",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123457)
+
+props_net_spieceasi.Fun.ASV.comp <- netAnalyze(net_spieceasi.Fun.ASV.comp, 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+summary(props_net_spieceasi.Fun.ASV.comp)$glob_probs
+
+
+comp_net_spieceasi.Fun.ASV.comp <- netCompare(props_net_spieceasi.Fun.ASV.comp, 
+                          verbose = FALSE,
+                          seed = 123456, permTest = TRUE, nPerm = 500)
+
+comp_net_spieceasi.Fun.ASV.comp.sum<-summary(comp_net_spieceasi.Fun.ASV.comp, 
+        groupNames = c("Fungi dominated", "Bacteria dominated"),
+        showCentr = c("degree", "between", "closeness"), 
+        numbNodes = 5)
+
+write.csv(comp_net_spieceasi.Fun.ASV.comp.sum$propdiffs, "/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp.r0.1.sum.csv")
+
+# Plot threshold r > 0.1
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp.r0.1.pdf",  width = 15, height = 8)
+
+plot(props_net_spieceasi.Fun.ASV.comp, 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     groupNames = c("Fungi-dominated", "Bacteria-dominated"),
+     showTitle = TRUE,
+     sameColThresh = 2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+
+
+# Plot threshold r > 0.2
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp.r0.2.pdf",  width = 15, height = 8)
+
+plot(props_net_spieceasi.Fun.ASV.comp, 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     edgeFilter  = "threshold",
+     edgeFilterPar  = 0.2,
+     groupNames = c( "Fungi-dominated", "Bacteria-dominated"),
+     showTitle = TRUE,
+     sameColThresh = 2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+
+# Plot threshold r > 0.3
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp.r0.3.pdf",  width = 15, height = 8)
+
+plot(props_net_spieceasi.Fun.ASV.comp, 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     edgeFilter  = "threshold",
+     edgeFilterPar  = 0.3,
+     groupNames = c("Fungi-dominated", "Bacteria-dominated"),
+     showTitle = TRUE,
+     sameColThresh = 2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+```
+
+## spieceasi_fungi_ASV level_compare_within site vs all sites
+```{r}
+# Split the phyloseq object into two groups -- site specific vs. all sites
+
+site_abb<-unique(physeq.Fun_fun.domin2@sam_data$site_ID)
+
+net_spieceasi.Fun.ASV.comp.site<-list()
+props_net_spieceasi.Fun.ASV.comp.site<-list()
+comp_net_spieceasi.Fun.ASV.comp.site <-list()
+comp_net_spieceasi.Fun.ASV.comp.sum.site<-list()
+
+for(i in 1:length(site_abb)){
+  
+physeq.Fun_fun.domin2.site<-subset_samples_no_zero(physeq.Fun_fun.domin2, site_ID==site_abb[i])
+
+net_spieceasi.Fun.ASV.comp.site[[i]]<- netConstruct(data=physeq.Fun_fun.domin2.site, 
+                                      data2=physeq.Fun_fun.domin2, 
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 100),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 50),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #zeroMethod = "pseudoZO",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123457)
+
+props_net_spieceasi.Fun.ASV.comp.site[[i]] <- netAnalyze(net_spieceasi.Fun.ASV.comp.site[[i]], 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+
+comp_net_spieceasi.Fun.ASV.comp.site[[i]] <- netCompare(props_net_spieceasi.Fun.ASV.comp.site[[i]], 
+                          verbose = FALSE,
+                          seed = 123456, permTest = TRUE, nPerm = 500)
+
+comp_net_spieceasi.Fun.ASV.comp.sum.site[[i]]<-summary(comp_net_spieceasi.Fun.ASV.comp.site[[i]], 
+        groupNames = c(paste("Within site", site_abb[i]), "All sites"),
+        showCentr = c("degree", "between", "closeness"), 
+        numbNodes = 5)
+}
+
+site.list.propdiffs<-list()
+ site.list.jaccmat<-list()
+for(i in 1:length(site_abb)){
+  site.list.propdiffs[[i]]<-comp_net_spieceasi.Fun.ASV.comp.sum.site[[i]]$propdiffs
+  site.list.jaccmat[[i]]<-comp_net_spieceasi.Fun.ASV.comp.sum.site[[i]]$jaccmat
+}
+  
+# save data frames as different sheets
+ # network property 
+for(i in c(1:12)){write.xlsx(x =site.list.propdiffs[[i]], 
+             file = "/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp_site.propdiff.r0.1.xlsx", 
+             sheetName = site_abb[i], append = TRUE)
+ }
+ 
+# network similarity based on jaccard index 
+ for(i in c(1:12)){write.xlsx(x =site.list.jaccmat[[i]], 
+             file = "/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp_site.jaccmat.r0.1.xlsx", 
+             sheetName = site_abb[i], append = TRUE)
+ }
+
+# Plot an example of the site
+site_chosen<-"SB"
+
+pdf(paste0("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Fun.ASV.comp_site", site_chosen, ".r0.1.pdf"),width = 15, height = 8)
+
+plot(props_net_spieceasi.Fun.ASV.comp.site[[9]], 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     edgeFilter = "threshold",
+     edgeFilterPar = 0.1,
+     groupNames =c(paste("Within site", site_chosen), "All sites"),
+     title1 = "Network on ASV level with spieceasi correlations", 
+     showTitle = TRUE,
+     sameColThresh = 2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+```
+
+# Bacteria co-occurrence network
+## bacteria-spieceasi correlation
+## spieceasi_bacteria_ASV level
+```{r}
+# 25% quantile of bacteria reads in samples
+quantile(colSums(physeq.Bac@otu_table),0.25)
+
+# construct network
+net_spieceasi.Bac.ASV<- netConstruct(physeq.Bac,
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 300),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 298),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #zeroMethod = "pseudoZO",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123456)
+                           
+                           
+# network analyzed
+props_net_spieceasi.Bac.ASV <- netAnalyze(net_spieceasi.Bac.ASV, clustMethod = "cluster_fast_greedy")
+
+# Plot 
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.pdf",  width = 8, height = 8)
+plot(props_net_spieceasi.Bac.ASV, 
+     nodeColor = "cluster", 
+     nodeSize = "clr",
+     title1 = "Network on ASV level with spieceasi correlations", 
+     showTitle = TRUE,
+    cexTitle = 1,      cexLabels = 3)
+
+legend(0.7, 1.1, cex = 1, title = "estimated correlation:", 
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+       bty = "n", horiz = TRUE)
+
+dev.off()
+```
+
+
+## spieceasi_bacteria_ASV level_compare_fungi_vs_bacteria_dominated
+```{r}
+# Split the phyloseq object into two groups
+physeq.Bac_fun.domin <- subset_samples_no_zero(physeq.Bac, microbial_community== "Fungi_dominated")
+physeq.Bac_bac.domin <- subset_samples_no_zero(physeq.Bac, microbial_community== "Bacteria_dominated")
+                                                   
+net_spieceasi.Bac.ASV.comp<- netConstruct(data=physeq.Bac_fun.domin, 
+                                      data2=physeq.Bac_bac.domin, 
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 100),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 298),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #zeroMethod = "pseudoZO",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123457)
+
+props_net_spieceasi.Bac.ASV.comp <- netAnalyze(net_spieceasi.Bac.ASV.comp, 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+summary(props_net_spieceasi.Bac.ASV.comp)$glob_probs
+
+
+comp_net_spieceasi.Bac.ASV.comp <- netCompare(props_net_spieceasi.Bac.ASV.comp, 
+                          permTest = TRUE, nPerm = 500,
+                          verbose = FALSE,
+                          seed = 123456)
+
+comp_net_spieceasi.Bac.ASV.comp.sum<-summary(comp_net_spieceasi.Bac.ASV.comp, 
+        groupNames = c("Fungi dominated", "Bacteria dominated"),
+        showCentr = c("degree", "between", "closeness"), 
+        numbNodes = 5)
+
+write.csv(comp_net_spieceasi.Bac.ASV.comp.sum$propdiffs_lcc, "/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp.r0.1.sum.csv")
+
+
+# Plot threshold r > 0.1
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp.r0.1.pdf",  width = 15, height = 8)
+
+plot(props_net_spieceasi.Bac.ASV.comp, 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     groupNames = c("Fungi-dominated", "Bacteria-dominated"),
+     showTitle = TRUE,
+     sameColThresh = 2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+
+
+# Plot threshold r > 0.2
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp.r0.2.pdf",  width = 15, height = 8)
+
+plot(props_net_spieceasi.Bac.ASV.comp, 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     groupNames = c("Fungi-dominated", "Bacteria-dominated"),
+     showTitle = TRUE,
+     sameColThresh = 2,
+     edgeFilter = "threshold",
+     edgeFilterPar = 0.2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+
+# Plot threshold r > 0.3
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp.r0.3.pdf",  width = 15, height = 8)
+
+plot(props_net_spieceasi.Bac.ASV.comp, 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     groupNames = c("Fungi-dominated", "Bacteria-dominated"),
+     showTitle = TRUE,
+     sameColThresh = 2,
+     edgeFilter = "threshold",
+     edgeFilterPar = 0.3,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+```
+
+
+## spieceasi_bacteria_ASV level_compare_within site vs all sites
+```{r}
+# Split the phyloseq object into two groups -- site specific vs. all sites
+
+site_abb<-unique(physeq.Bac_bac.domin2@sam_data$site_ID)
+
+net_spieceasi.Bac.ASV.comp.site<-list()
+props_net_spieceasi.Bac.ASV.comp.site<-list()
+comp_net_spieceasi.Bac.ASV.comp.site <-list()
+comp_net_spieceasi.Bac.ASV.comp.sum.site<-list()
+
+for(i in c(1:9,11:12)){ # here I skipped site 10, because for some reason, it has been generating errors at site 10
+  
+physeq.Bac_bac.domin2.site<-subset_samples_no_zero(physeq.Bac_bac.domin2, site_ID==site_abb[i])
+
+net_spieceasi.Bac.ASV.comp.site[[i]]<- netConstruct(data=physeq.Bac_bac.domin2.site, 
+                                      data2=physeq.Bac_bac.domin2, 
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 100),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 50),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #zeroMethod = "pseudoZO",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123457)
+
+props_net_spieceasi.Bac.ASV.comp.site[[i]] <- netAnalyze(net_spieceasi.Bac.ASV.comp.site[[i]], 
+                           centrLCC = FALSE,
+                           avDissIgnoreInf = TRUE,
+                           sPathNorm = FALSE,
+                           clustMethod = "cluster_fast_greedy",
+                           hubPar = c("degree", "eigenvector"),
+                           hubQuant = 0.9,
+                           lnormFit = TRUE,
+                           normDeg = FALSE,
+                           normBetw = FALSE,
+                           normClose = FALSE,
+                           normEigen = FALSE)
+
+
+comp_net_spieceasi.Bac.ASV.comp.site[[i]] <- netCompare(props_net_spieceasi.Bac.ASV.comp.site[[i]], 
+                          verbose = FALSE,
+                          seed = 123456, permTest = TRUE, nPerm = 500)
+
+comp_net_spieceasi.Bac.ASV.comp.sum.site[[i]]<-summary(comp_net_spieceasi.Bac.ASV.comp.site[[i]], 
+        groupNames = c(paste("Within site", site_abb[i]), "All sites"),
+        showCentr = c("degree", "between", "closeness"), 
+        numbNodes = 5)
+}
+
+site.list.propdiffs<-list()
+ site.list.jaccmat<-list()
+for(i in 1:length(site_abb)){
+  site.list.propdiffs[[i]]<-comp_net_spieceasi.Bac.ASV.comp.sum.site[[i]]$propdiffs
+  site.list.jaccmat[[i]]<-comp_net_spieceasi.Bac.ASV.comp.sum.site[[i]]$jaccmat
+}
+
+# save data frames as different sheets
+ # network property 
+for(i in c(1:9,11,12)){write.xlsx(x =site.list.propdiffs[[i]], 
+             file = "/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp_site.propdiff.r0.1.xlsx", 
+             sheetName = site_abb[i], append = TRUE)
+ }
+ 
+# network similarity based on jaccard index 
+ for(i in c(1:9,11,12)){write.xlsx(x =site.list.jaccmat[[i]], 
+             file = "/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp_site.jaccmat.r0.1.xlsx", 
+             sheetName = site_abb[i], append = TRUE)
+ }
+
+# Plot an example of the site
+site_chosen<-"JP"
+which(site_abb=="JP") #4
+
+pdf(paste0("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.Bac.ASV.comp_site", site_chosen, ".r0.1.pdf"),width = 15, height = 8)
+
+plot(props_net_spieceasi.Bac.ASV.comp.site[[4]], 
+     sameLayout = TRUE, 
+     nodeColor = "cluster",
+     nodeSize = "clr",
+     groupNames =c(paste("Within site", site_chosen), "All sites"),
+     title1 = "Network on ASV level with spieceasi correlations", 
+     showTitle = TRUE,
+     sameColThresh = 2,
+     cexTitle = 1,cexLabels = 3)
+
+dev.off()
+```
+
+# Fungi Bacteria co-occurrence network
+## Fungi Bacteria-spieceasi correlation r = 0.1
+## spieceasi_Fungi Bacteria_ASV level
+```{r}
+# construct network
+net_spieceasi.bac.fun.ASV<- netConstruct(physeq.bac.fun,
+                           filtTax = "highestFreq",
+                           filtTaxPar = list(highestFreq = 100),
+                           filtSamp = "totalReads",
+                           filtSampPar = list(totalReads = 300),
+                           measure = "spieceasi",
+                           normMethod = "none",
+                           #sparsMethod = "threshold",
+                           thresh = 0.1,
+                           verbose = 3,
+                           dissFunc = "signed",
+                            measurePar = list(method = "mb",  pulsar.params = list(rep.num = 10),  symBetaMode = "ave"),
+                           seed = 123456)
+                           
+                           
+# network analyzed
+props_net_spieceasi.bac.fun.ASV <- netAnalyze(net_spieceasi.bac.fun.ASV, clustMethod = "cluster_fast_greedy")
+
+# Plot 
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.bac.fun.ASV.r0.1.pdf",  width = 8, height = 8)
+plot(props_net_spieceasi.bac.fun.ASV, 
+     nodeColor = "cluster", 
+     nodeSize = "clr",
+     showTitle = TRUE,
+    cexTitle = 1,      cexLabels = 3)
+
+legend(0.7, 1.1, cex = 1, title = "estimated correlation:", 
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+       bty = "n", horiz = TRUE)
+
+dev.off()
+
+# Plot by Kingdom 
+
+taxtab <- as(tax_table(physeq.bac.fun), "matrix")
+Kingdom <- as.factor(taxtab[, "Kingdom"])
+
+# Define Kingdom colors
+Kingdomcol <- c("cyan", "deeppink")
+
+pdf("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/net_spieceasi.bac.fun.ASV.r0.1.Kingdom.pdf",  width = 8, height = 8)
+plot(props_net_spieceasi.bac.fun.ASV, 
+     nodeSize = "clr",
+     showTitle = TRUE,
+     nodeColor = "feature", 
+     featVecCol = Kingdom, 
+     colorVec =  Kingdomcol,
+    cexTitle = 1,      cexLabels = 3)
+
+legend(0.7, 1.0, cex = 0.6, title = "estimated correlation:", 
+       legend = c("+","-"), lty = 1, lwd = 3, col = c("#009900","red"), 
+       bty = "n", horiz = TRUE)
+
+dev.off()
+```
+
+save.image("/scratch/groups/fukamit/Wu_mimulus_analysis2022/spieceasi_signed_r0.1_clam/spieceasi_signed_r0.1_clam.rdata")
+

@@ -1,0 +1,483 @@
+---
+title: "20220203_make_phyloseq_objects"
+author: "Wu"
+date: "2023-03-07"
+output: html_document
+note: https://userweb.eng.gla.ac.uk/umer.ijaz/projects/microbiomeSeq_Tutorial.html; https://github.com/umerijaz/microbiomeSeq/wiki/Co-ocurrence-Pattern-Analysis
+---
+
+save.image("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/make_phyloseq_objects/20220203_make_phyloseq_objects.rdata")
+
+# Load libraries and previous data
+```{r}
+library(microbiomeSeq)
+# needs to install many dependencies first:
+# BiocManager::install(c("AnnotationDbi", "DESeq2", "GO.db", "impute", "phyloseq", "preprocessCore"))
+# remotes::install_github("cran/KMDA")
+# install.packages("adespatial")
+# install.packages("RNeXML", deps = TRUE)
+# devtools::install_github("umerijaz/microbiomeSeq")
+# remotes::install_github("umerijaz/microbiomeSeq")
+
+library(vegan)
+
+library(ggplot2)
+
+library(lemon)
+
+library(phyloseq) # devtools::install_github("joey711/phyloseq") # packageVersion("phyloseq") 1.41.1
+
+library(microViz)
+
+library(data.table)
+
+library(clam)
+
+library(dplyr)
+```
+
+# Generate a phyloseq object of fungi 
+```{r Load fungi data}
+# Load fungi data 
+# abundance table
+abund_table.Fun<-read.table("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs_counts.tsv",sep = "\t", row.names = 1,header = TRUE)
+
+# ASV taxonomy 
+ASV_taxonomy.Fun<-read.table("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs_taxonomy.tsv",sep = "\t", row.names = 1); colnames(ASV_taxonomy.Fun)<-ASV_taxonomy.Fun[1,]; ASV_taxonomy.Fun<-ASV_taxonomy.Fun[-1,]
+# notice that the column OTU ID is for the ID in "dada2_ITS1/unpooled_CONSTAX/unpooled.all_ASVs.fa" file before we eliminated non-fungal sequences, so we can delete this column
+ASV_taxonomy.Fun<-ASV_taxonomy.Fun[,-1]
+ASV_taxonomy.Fun$Species<-trimws(ASV_taxonomy.Fun$Species) # remove white space trailing behind species names
+
+#meta data
+meta_table.Fun<-read.csv("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/metaITS.csv")
+rownames(meta_table.Fun)<-meta_table.Fun[,1]; meta_table.Fun<-meta_table.Fun[,-1]
+
+# Phylogenetic data 
+fitGTR.Fun<-readRDS("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/fitGTR.rds")
+
+# Check if the data match among these data frames 
+identical(rownames(abund_table.Fun), rownames(ASV_taxonomy.Fun))
+identical(colnames(abund_table.Fun),rownames(meta_table.Fun))
+identical(rownames(abund_table.Fun), fitGTR.Fun$tree$tip.label)
+# relabel phylogeny tips
+fitGTR.Fun$tree$tip.label<-gsub(">","", fitGTR.Fun$tree$tip.label)
+identical(rownames(abund_table.Fun), fitGTR.Fun$tree$tip.label)
+head(ASV_taxonomy.Fun)
+```
+
+```{r Create new columns in meta data }
+# absence presence of fungi 
+meta_table.Fun$fungi_presence<-meta_table.Fun$Fcfu_corr
+meta_table.Fun$fungi_presence<-ifelse(meta_table.Fun$fungi_presence == 0, "Absent","Present")   
+length(which(meta_table.Fun$fungi_presence=="Absent")) / nrow(meta_table.Fun)  # perc of samples with fungi colonies absent = 0.6183953
+length(which(meta_table.Fun$fungi_presence=="Present")) / nrow(meta_table.Fun)  # perc of samples with fungi colonies absent = 0.3816047  
+
+# absence presence of fungi 
+meta_table.Fun$Bac_presence<-meta_table.Fun$Bfcu_corr
+meta_table.Fun$Bac_presence<-ifelse(meta_table.Fun$Bac_presence == 0, "Absent","Present")   
+length(which(meta_table.Fun$Bac_presence=="Absent")) / nrow(meta_table.Fun)  # perc of samples with fungi colonies absent = 0.3463796
+length(which(meta_table.Fun$Bac_presence=="Present")) / nrow(meta_table.Fun)  # perc of samples with fungi colonies absent = 0.6536204  
+```
+
+To generate a phyloseq object to be used for analysis, a phyloseq function merge_phyloseq can be used to combine the taxa abundance information (OTU), taxa assignment (TAX), sample data (SAM) and phylogenetic tree (OTU_tree) in Newick format as follows; More details on how to construct a phyloseq object can be obtained from the phyloseq site cited earlier.
+```{r phyloseq}
+
+ASV.Fun = otu_table(as.matrix(abund_table.Fun), taxa_are_rows = TRUE)
+TAX.Fun = tax_table(as.matrix(ASV_taxonomy.Fun))
+SAM.Fun = sample_data(meta_table.Fun)
+ASV_tree.Fun<-phy_tree(fitGTR.Fun$tree)
+
+physeq.Fun<-merge_phyloseq(phyloseq(ASV.Fun, TAX.Fun),SAM.Fun,ASV_tree.Fun)
+
+# fix the taxonomic names using tax_fix in the microViz package; to see interactively, use: tax_fix_interactive(physeq.Fun) 
+physeq.Fun<- physeq.Fun %>%
+ tax_fix(
+  min_length = 4,
+  unknowns = c(""),
+  sep = " ", anon_unique = TRUE,
+  suffix_rank = "classified"
+ )
+
+# Check if taxonomic problems prevent aggregation of ASVs
+physeq.Fun  %>%
+  ps_calc_dominant(rank = "Species") 
+# To fix the problem, try:
+#  `physeq.Fun %>% tax_fix(unknowns = c("Amphinema Genus", "Dothideomycetes Class", "Malassezia globosa", "Penicillium Genus", "Sarocladium kiliense"))`
+physeq.Fun<-physeq.Fun %>% tax_fix(unknowns = c("Malassezia globosa", "Sarocladium kiliense"))
+physeq.Fun<-physeq.Fun %>% tax_fix(unknowns = c("Amphinema Genus", "Dothideomycetes Class", "Malassezia globosa", "Penicillium Genus", "Sarocladium kiliense"))
+physeq.Fun<-physeq.Fun%>% tax_fix(unknowns = c("Amphinema Genus", "Dothideomycetes Class", "Malassezia globosa", "Penicillium Genus", "Sarocladium kiliense"))
+# To fix the problem, try: yourData %>% tax_fix(unknowns = c("Amphinema Genus", "Dothideomycetes Class", "Penicillium Genus"))
+physeq.Fun<-physeq.Fun %>% tax_fix(unknowns = c("Amphinema Genus", "Dothideomycetes Class", "Penicillium Genus"))
+
+# Mannually fix otu_tax table
+Amphinema.index<-which(data.frame(physeq.Fun@tax_table@.Data)$Species == "Amphinema Genus")
+View(as.matrix(ASV_taxonomy.Fun)[Amphinema.index,])
+ASV_taxonomy.Fun["ASV_3124",]<-ASV_taxonomy.Fun["ASV_2465",]
+View(as.matrix(ASV_taxonomy.Fun)[Amphinema.index,])
+
+Dothideomycetes.index<-which(data.frame(physeq.Fun@tax_table@.Data)$Species == "Dothideomycetes Class")
+View(as.matrix(ASV_taxonomy.Fun)[Dothideomycetes.index,])
+ASV_taxonomy.Fun["ASV_866",]$Phylum<-"Ascomycota"
+ASV_taxonomy.Fun["ASV_934",]$Phylum<-"Ascomycota"
+View(as.matrix(ASV_taxonomy.Fun)[Dothideomycetes.index,])
+
+Penicillium.index<-which(data.frame(physeq.Fun@tax_table@.Data)$Species == "Penicillium Genus")
+View(as.matrix(ASV_taxonomy.Fun)[Penicillium.index,])
+ASV_taxonomy.Fun["ASV_583",]<-ASV_taxonomy.Fun["ASV_76",]
+View(as.matrix(ASV_taxonomy.Fun)[Penicillium.index,])
+
+# NOW REPEAT THE STEPS IN LINE 74-92
+
+# save fungi phyloseq object 
+# saveRDS(physeq.Fun, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/phyloseq.rds")
+
+```
+
+# Generate a phyloseq object of bacteria 
+```{r Load bacteria data}
+# Load bacteria data 
+# abundance table
+abund_table.Bac<-read.table("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/unpooled.ASVs_counts.tsv",sep = "\t", row.names = 1,header = TRUE)
+
+# ASV taxonomy 
+ASV_taxonomy.Bac<-read.table("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/unpooled.ASVs_taxonomy.tsv",sep = "\t", row.names = 1); colnames(ASV_taxonomy.Bac)<-ASV_taxonomy.Bac[1,]; ASV_taxonomy.Bac<-ASV_taxonomy.Bac[-1,]
+# notice that the column OTU ID is for the ID in "dada2_B16S/unpooled/unpooled.all_ASVs.fa" file before we eliminated non-fungal sequences, so we can delete this column
+ASV_taxonomy.Bac<-ASV_taxonomy.Bac[,-1]
+
+#meta data
+meta_table.Bac<-read.csv("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/meta16S.csv")
+rownames(meta_table.Bac)<-meta_table.Bac[,1]; meta_table.Bac<-meta_table.Bac[,-1]
+
+# Phylogenetic data 
+fitGTR.bac<-readRDS("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/fitGTR.rds")
+
+# Check if the data match among these data frames 
+identical(rownames(abund_table.Bac), rownames(ASV_taxonomy.Bac))
+identical(colnames(abund_table.Bac),rownames(meta_table.Bac))
+identical(rownames(abund_table.Bac), fitGTR.bac$tree$tip.label)
+head(ASV_taxonomy.Bac)
+```
+
+```{r Create new columns in meta data }
+# absence presence of fungi 
+meta_table.Bac$fungi_presence<-meta_table.Bac$Fcfu_corr
+meta_table.Bac$fungi_presence<-ifelse(meta_table.Bac$fungi_presence == 0, "Absent","Present")   
+length(which(meta_table.Bac$fungi_presence=="Absent")) / nrow(meta_table.Bac)  # perc of samples with fungi colonies absent = 0.6214149
+length(which(meta_table.Bac$fungi_presence=="Present")) / nrow(meta_table.Bac)  # perc of samples with fungi colonies absent = 0.3785851  
+
+# absence presence of bacteria 
+meta_table.Bac$Bac_presence<-meta_table.Bac$Bfcu_corr
+meta_table.Bac$Bac_presence<-ifelse(meta_table.Bac$Bac_presence == 0, "Absent","Present")   
+length(which(meta_table.Bac$Bac_presence=="Absent")) / nrow(meta_table.Bac)  # perc of samples with bacteria colonies absent = 0.3393881
+length(which(meta_table.Bac$Bac_presence=="Present")) / nrow(meta_table.Bac)  # perc of samples with bacteria colonies absent = 0.6606119  
+```
+
+To generate a phyloseq object to be used for analysis, a phyloseq function merge_phyloseq can be used to combine the taxa abundance information (OTU), taxa assignment (TAX), sample data (SAM) and phylogenetic tree (OTU_tree) in Newick format as follows; More details on how to construct a phyloseq object can be obtained from the phyloseq site cited earlier.
+```{r phyloseq}
+
+ASV.Bac = otu_table(as.matrix(abund_table.Bac), taxa_are_rows = TRUE)
+TAX.Bac = tax_table(as.matrix(ASV_taxonomy.Bac))
+SAM.Bac = sample_data(meta_table.Bac)
+ASV_tree.Bac<-phy_tree(fitGTR.bac$tree)
+
+physeq.Bac<-merge_phyloseq(phyloseq(ASV.Bac, TAX.Bac),SAM.Bac,ASV_tree.Bac)
+
+# fix the taxonomic names using tax_fix in the microViz package; to see interactively, use: tax_fix_interactive(physeq.Fun) 
+physeq.Bac<- physeq.Bac %>%
+ tax_fix(
+  min_length = 4,
+  unknowns = c(""),
+  sep = " ", anon_unique = TRUE,
+  suffix_rank = "classified"
+ )
+
+# Check if taxonomic problems prevent aggregation of ASVs
+physeq.Bac  %>%
+  ps_calc_dominant(rank = "Species") 
+# To fix the problem, try:
+#  `physeq.Fun %>% tax_fix(unknowns = c("Amphinema Genus", "Dothideomycetes Class", "Malassezia globosa", "Penicillium Genus", "Sarocladium kiliense"))`
+physeq.Bac<-physeq.Bac %>% tax_fix(unknowns = c("acidiphila", "alpinus", "aminovorans", "aquatica", "asaccharolytica", "aurantiaca", "aureus", "celatum", "denitrificans", "dokdonensis", "faecalis", "faecium", "faeni", "gilardii", "ginsengisoli", "haemolyticus", "halotolerans", "indicus", "jinjuensis", "johnsonii", "koreense", "koreensis", "lactis", "marina", "marinus", "massiliensis", "metallidurans", "michiganensis", "olei", "populi", "rhizophila", "salmonicida", "soli", "taiwanensis", "thermophilus", "vaginalis", "xinjiangensis"))
+
+# saveRDS(physeq.Bac, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/phyloseq.rds")
+
+```
+
+# Use CLAMtest on the meta datafile to categorize flower samples into: fungi dominant, bacteria dominant, co dominance, too rare
+Codes of this section adopted from https://gitlab.com/teamnectarmicrobe/n06_nectarmicrobes_ecoevo/-/blob/main/field_survey/Field_Survey_Analysis.Rmd
+```{r}
+meta_table<-rbind(data.frame(physeq.Bac@sam_data),data.frame(physeq.Fun@sam_data))
+meta_table<-unique(meta_table)
+```
+
+```{r Run CLAM test}
+
+sites <- unique(meta_table$site_ID)
+
+all_flowers_clam = NULL
+
+#show that clam_comm is the same as df with both bacteria and fungi present 
+#df_test <- df %>% filter(FCFU_ul > 0 & BCFUul > 0)
+
+
+#add 1 to each so it's CFY_u1 +1. This prevents having any flowers with zeros: 
+meta_table_1 <- meta_table %>% mutate(Fcfu_corr_1 = Fcfu_corr+1)
+meta_table_1 <- meta_table_1 %>% mutate(Bfcu_corr_1 = Bfcu_corr+1)
+
+# check NA
+which(is.na(meta_table_1$Bfcu_corr_1))
+which(is.na(meta_table_1$Fcfu_corr_1))
+
+# Loop
+for (x in sites){
+  meta_table_fil <- meta_table_1 %>% filter(site_ID==x)
+  
+  #make a matrix of community count matrix (densities of bacteria and yeast per flower) 
+  clam_comm <- meta_table_fil %>% select(Fcfu_corr_1, Bfcu_corr_1)
+  #clam_comm_matrix <- as.matrix(clam_comm)
+  
+  #transpose so flowers are rows: 
+  clam_comm <- do.call(rbind, c(clam_comm))
+  
+  #name env dataframe: 
+  clam_env <- data.frame(microbe=c("fungi", "bacteria"))
+  
+  clam<-with(clam_env, clamtest(clam_comm, 
+                                  coverage.limit = 10, specialization = 2/3,  npoints = 5, alpha = 0.05))
+  
+  #change species to flower: 
+  clam$Species <- rownames(meta_table_fil)
+  
+  #change classes names: this uses package mgsub 
+  clam$Classes <- sub("Specialist_Fcfu_corr_1", "Fungi_dominated", clam$Classes)
+  clam$Classes <- sub("Generalist", "Co_dominated", clam$Classes)
+  clam$Classes <- sub("Specialist_Bfcu_corr_1", "Bacteria_dominated", clam$Classes)
+  
+  #add a column with X: 
+  clam$site[x] <- x
+  
+  all_flowers_clam = rbind(all_flowers_clam, clam)}
+
+#rename columns in full dataframe: 
+all_flowers_clam <- all_flowers_clam %>% rename(flower = Species, microbial_community = Classes, fungal_density = Total_Fcfu_corr_1, bac_density = Total_Bfcu_corr_1)
+
+#transform axes to relevant scales: 
+all_flowers_clam <- all_flowers_clam %>% mutate(fungal_density_x2 = fungal_density/100)
+all_flowers_clam <- all_flowers_clam %>% mutate(bac_density_x5 =bac_density/100000)
+
+# save the data frame
+# write.csv(all_flowers_clam, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/make_phyloseq_objects/all_flowers_clam.csv")
+
+community_colors <- c("Fungi_dominated" = "#FBD848", "Bacteria_dominated" = "#0f0e61", "Co_dominated"="#56c482", "Too_rare"="grey50", "No_microbes" = "grey71")
+
+#Plot results:
+
+#All sites:
+
+clam_plot <- ggplot(all_flowers_clam, aes(x=fungal_density_x2, y=bac_density_x5, color=microbial_community)) +
+  geom_point(aes(alpha=0.25)) +
+  xlab("Fungal density (x10^2 CFU/uL+1)") +
+  ylab("Bacterial density (x10^5 CFU/uL+1)") +
+  scale_color_manual(values = community_colors) +
+  theme(legend.position = "none")
+  
+clam_plot
+
+clam_plot_zoomed <- ggplot(all_flowers_clam, aes(x=fungal_density_x2, y=bac_density_x5, color=microbial_community)) +
+  geom_point(aes(alpha=0.25)) +
+  xlab("Fungal density (x10^2 CFU/uL+1)") +
+  ylab("Bacterial density (x10^5 CFU/uL+1)") +
+  scale_color_manual(values = community_colors) +
+  xlim(0,6) +
+  ylim(0,6) +
+  theme(axis.title = element_blank(), legend.position = "none")
+
+clam_plot_zoomed
+
+clam_plot_zoomed_facet <- ggplot(all_flowers_clam, aes(x=fungal_density_x2, y=bac_density_x5, color=microbial_community)) +
+  geom_point(aes(alpha=0.25)) +
+  xlab("Fungal density (x10^2 CFU/uCFU/uL+1)") +
+  ylab("Bacterial density (x10^5 CFU/uL+1)") +
+  scale_color_manual(values = community_colors) +
+  xlim(0,6) +
+  ylim(0,6) +
+  facet_rep_wrap(.~site, scales = "fixed", repeat.tick.labels = TRUE, labeller = labeller(site = 
+    c("BB" = "Bodega Bay",
+      "MW" = "Muir Woods",
+      "SR" = "Sweeney Ridge",
+      "SB" = "Skyline Blvd.",
+      "SG" = "San Gregorio",
+      "LH" = "La Honda",
+      "SV" = "Soquel Valley",
+      "OH" = "Oak Hills",
+      "CH" = "Carmel Highlands",
+      "BS" = "Big Sur",
+      "JP" = "Jack's Peak",
+      "SA" = "Swanton"))) +
+  theme(legend.position = "none")
+
+
+clam_plot_zoomed_facet
+
+
+# How do sites differ?
+
+#make new dataframe with number of bacteria vs. yeast_dominated flowers per site: 
+clam_summary <- all_flowers_clam %>% group_by(site) %>% count(microbial_community) 
+
+#clam_summary$site <- factor(clam_summary$site, levels=c("BB", "MW", "SR", "SB", "LH", "SG", "SV", "SA", "OH", "JP", "CH", "BS"))
+
+clam_summary$site <- factor(clam_summary$site, levels=c("BS", "CH", "JP", "OH", "SA", "SV", "SG", "LH", "SB", "SR", "MW", "BB"))
+
+#stacked bar chart: 
+site_barplot <- ggplot(clam_summary , aes(x=site, y=n, fill=factor(microbial_community, levels=c( "Too_rare", "Fungi_dominated", "Co_dominated", "Bacteria_dominated")))) +
+  geom_bar(stat="identity", position="stack") +
+  scale_fill_manual(values = community_colors) +
+  ylab("# flowers of each community type") +
+  theme(legend.position = "none") + 
+  coord_flip() 
+  #scale_x_discrete(labels=c("12", "11", "10", "9", "8", "7", "6", "5", "4", "3","2", "1"))
+
+site_barplot
+```
+
+```{r for fungi make another threhold ctiteria log(FCFUs+1) = 6 }
+# this threshold is based on looking at the plot between rel. abundance of Bucklezyma genus and log(FCFUs +1)
+# potnetially mean that 1) humming bird has pollinated and dispersed microbes and 2) there are enough time that allowed biotic interaction to occur 
+
+threshold2.index<-which(all_flowers_clam$fungal_density > exp(6)-1) # 402.4288
+
+length(threshold2.index) # only 32 flowers left using this criteria
+
+all_flowers_clam$biotic_inter<-"No"
+
+all_flowers_clam$biotic_inter[threshold2.index]<-"Yes"
+```
+
+```{r update phyloseq by adding the CLAMtest info}
+# fungi:
+identical(all_flowers_clam$flower[match(rownames(physeq.Fun@sam_data), all_flowers_clam$flower)],
+          rownames(physeq.Fun@sam_data))
+
+sam_data(physeq.Fun)$microbial_community<-all_flowers_clam$microbial_community[match(rownames(physeq.Fun@sam_data), all_flowers_clam$flower)]
+
+sam_data(physeq.Fun)$biotic_inter<-all_flowers_clam$biotic_inter[match(rownames(physeq.Fun@sam_data), all_flowers_clam$flower)]
+
+# saveRDS(physeq.Fun, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/phyloseq.rds")
+
+# bacteria
+identical(all_flowers_clam$flower[match(rownames(physeq.Bac@sam_data), all_flowers_clam$flower)],
+          rownames(physeq.Bac@sam_data))
+
+sam_data(physeq.Bac)$microbial_community<-all_flowers_clam$microbial_community[match(rownames(physeq.Bac@sam_data), all_flowers_clam$flower)]
+
+sam_data(physeq.Bac)$biotic_inter<-all_flowers_clam$biotic_inter[match(rownames(physeq.Bac@sam_data), all_flowers_clam$flower)]
+
+# saveRDS(physeq.Bac, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_B16S/unpooled/phyloseq.rds")
+```
+
+# Transform counts to relative abundance
+```{r transform counts to relative abundance}
+# transform counts to relative abundance
+physeq.Bac.rel<-transform_sample_counts(physeq.Bac, function(x) x / sum(x) )
+physeq.Fun.rel<-transform_sample_counts(physeq.Fun, function(x) x / sum(x) )
+
+# change ASVs numbers
+taxa_names(physeq.Bac.rel) <- paste("bac_", taxa_names(physeq.Bac.rel), sep="")
+taxa_names(physeq.Bac.rel)
+
+taxa_names(physeq.Fun.rel) <- paste("fun_", taxa_names(physeq.Fun.rel), sep="")
+taxa_names(physeq.Fun.rel)
+
+# remove phylogeny
+physeq.Bac.rel@phy_tree<-NULL
+physeq.Fun.rel@phy_tree<-NULL
+
+# merge 
+physeq.bac.fun<-merge_phyloseq(physeq.Bac.rel, physeq.Fun.rel)
+
+physeq.bac.fun
+# phyloseq-class experiment-level object
+#otu_table()   OTU Table:         [ 8998 taxa and 1062 samples ]
+#sample_data() Sample Data:       [ 1062 samples by 48 sample variables ]
+#tax_table()   Taxonomy Table:    [ 8998 taxa by 7 taxonomic ranks ]
+
+# make sure that species names paste with genus names
+countSpaces <- function(s) { sapply(gregexpr(" ", s), function(p) { sum(p>=0) } ) }
+genuslack.index<- which(countSpaces(data.frame(physeq.bac.fun@tax_table@.Data)$Species)==0)
+# make full species column
+fullspecies<-data.frame(physeq.bac.fun@tax_table@.Data)$Species
+fullspecies[genuslack.index]<-paste(data.frame(physeq.bac.fun@tax_table@.Data)$Genus[genuslack.index], data.frame(physeq.bac.fun@tax_table@.Data)$Species[genuslack.index])
+which(countSpaces(fullspecies)==0) # check 
+
+newtaxtable<-data.frame(tax_table(physeq.bac.fun))
+newtaxtable$Species<-fullspecies
+newtaxtable$Kingdom<-rep("Bacteria",nrow(newtaxtable))
+newtaxtable$Kingdom[rownames(newtaxtable)%like% "fun"]<-rep("Fungi", length(newtaxtable$Kingdom[rownames(newtaxtable)%like% "fun"]))
+
+tax_table(physeq.bac.fun)<-as.matrix(newtaxtable)
+
+# add a column in meta data for the clamtest result 
+
+identical(all_flowers_clam$flower[match(rownames(physeq.bac.fun@sam_data), all_flowers_clam$flower)],
+          rownames(physeq.bac.fun@sam_data))
+
+sam_data(physeq.bac.fun)$microbial_community<-all_flowers_clam$microbial_community[match(rownames(physeq.bac.fun@sam_data), all_flowers_clam$flower)]
+
+sam_data(physeq.bac.fun)$biotic_inter<-all_flowers_clam$biotic_inter[match(rownames(physeq.bac.fun@sam_data), all_flowers_clam$flower)]
+# save 
+# saveRDS(physeq.bac.fun, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/make_phyloseq_objects/phyloseq.bac.fun_relabund.rds")
+```
+
+# Generate a phyloseq object of Bacteria and Fungi combined -- read counts  
+https://github.com/joey711/phyloseq/issues/967
+```{r}
+physeq.Bac2<-physeq.Bac
+physeq.Fun2<-physeq.Fun
+
+# change ASVs numbers
+taxa_names(physeq.Bac2) <- paste("bac_", taxa_names(physeq.Bac), sep="")
+taxa_names(physeq.Bac2)
+
+taxa_names(physeq.Fun2) <- paste("fun_", taxa_names(physeq.Fun), sep="")
+taxa_names(physeq.Fun2)
+
+# remove phylogeny
+physeq.Bac2@phy_tree<-NULL
+physeq.Fun2@phy_tree<-NULL
+
+# merge 
+physeq.bac.fun2<-merge_phyloseq(physeq.Bac2, physeq.Fun2)
+
+physeq.bac.fun2
+# phyloseq-class experiment-level object
+#otu_table()   OTU Table:         [ 8998 taxa and 1062 samples ]
+#sample_data() Sample Data:       [ 1062 samples by 48 sample variables ]
+#tax_table()   Taxonomy Table:    [ 8998 taxa by 7 taxonomic ranks ]
+
+# make sure that species names paste with genus names
+genuslack.index<- which(countSpaces(data.frame(physeq.bac.fun2@tax_table@.Data)$Species)==0)
+# make full species column
+fullspecies<-data.frame(physeq.bac.fun2@tax_table@.Data)$Species
+fullspecies[genuslack.index]<-paste(data.frame(physeq.bac.fun2@tax_table@.Data)$Genus[genuslack.index], data.frame(physeq.bac.fun2@tax_table@.Data)$Species[genuslack.index])
+which(countSpaces(fullspecies)==0) # check 
+
+newtaxtable<-data.frame(tax_table(physeq.bac.fun2))
+newtaxtable$Species<-fullspecies
+newtaxtable$Kingdom<-rep("Bacteria",nrow(newtaxtable))
+newtaxtable$Kingdom[rownames(newtaxtable)%like% "fun"]<-rep("Fungi", length(newtaxtable$Kingdom[rownames(newtaxtable)%like% "fun"]))
+
+tax_table(physeq.bac.fun2)<-as.matrix(newtaxtable)
+
+
+# add a column in meta data for the clamtest result 
+
+identical(all_flowers_clam$flower[match(rownames(physeq.bac.fun2@sam_data), all_flowers_clam$flower)],
+          rownames(physeq.bac.fun2@sam_data))
+
+sam_data(physeq.bac.fun2)$microbial_community<-all_flowers_clam$microbial_community[match(rownames(physeq.bac.fun2@sam_data), all_flowers_clam$flower)]
+
+sam_data(physeq.bac.fun2)$biotic_inter<-all_flowers_clam$biotic_inter[match(rownames(physeq.bac.fun2@sam_data), all_flowers_clam$flower)]
+
+# save 
+# saveRDS(physeq.bac.fun2, "C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/make_phyloseq_objects/phyloseq.bac.fun_rawcounts.rds")
+```

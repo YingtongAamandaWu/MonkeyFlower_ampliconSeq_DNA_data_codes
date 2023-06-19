@@ -1,0 +1,48 @@
+---
+title: "20230413_make_map"
+author: "Wu"
+date: "2023-04-13"
+output: html_document
+---
+
+# Load libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggmap)
+library(ggrepel)
+library(ggsn)
+# devtools::install_github('oswaldosantos/ggsn')
+
+```
+
+# Read data 
+```{r}
+
+survey2015<-read.csv("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/01_Data/metadata/2015_survey_siteinfo_location_envi.csv")
+
+survey2015$site<-substr(survey2015$Plant_ID,1,2)
+
+site_latlong.df<-data.frame(survey2015[,c(2,3,11)]%>% group_by(site) %>% summarise(lat = mean(lat), long = mean(long)))
+
+range(site_latlong.df$lat)
+
+range(site_latlong.df$long)
+```
+
+# Map
+```{r}
+myLocation <- c(-123.5, 36, -121, 38.5)
+
+myMap <- get_map(location=myLocation,source="stamen", maptype="terrain", crop=FALSE)
+
+tiff("C:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/Map/map.tiff", width = 4, height = 6, unit = "in", res = 600)
+
+ggmap(myMap)+geom_point(aes(y = long, x = lat), data = site_latlong.df, alpha = 0.7)+
+   ylab("Longitude") + xlab("Latitude")+
+  geom_label_repel( data = site_latlong.df, aes(y = long, x = lat, label = site), size = 3, 
+                     box.padding = unit(0.5, "lines"))+
+   ggsn::scalebar(x.min = -123.5, x.max = -122.5, y.min = 35.5,  y.max = 36.3, st.bottom = FALSE, st.color = "black",st.size = 3, height = 0.1, st.dist = 0.1,  dist = 30, dist_unit = "km", dd2km = TRUE, model = 'WGS84', transform = TRUE,  box.fill = c("yellow", "white"))
+           
+dev.off()
+```

@@ -1,0 +1,535 @@
+---
+title: "20230202_ITS1_DADA2_CONSTAXtaxa"
+author: "Wu"
+date: "2023-02-02"
+output: html_document
+note: The sequences used here were already trimmed by itsxpress, before importaing to R here; tutorials for dada2 is available at https://benjjneb.github.io/dada2/ITS_workflow.html;https://astrobiomike.github.io/amplicon/dada2_workflow_ex#inferring-asvs
+---
+# My folder in GROUP_HOME
+/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2_ITS1/
+
+# Before running the R here, load following modules in Stanford Sherlock (NOTE - the "assignTaxonomy" will use large memory)
+srun -p normal --mem 40G -n 1 -N 1 -c 12 -t 0-08:00 --pty /bin/bash 
+module load R/4.2.0
+
+save.image("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/20230124_ITS1_DADA2_CONSTAXtaxa.rdata")
+
+#load packages
+```{r}
+library(dada2) 
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+# install.packages("BiocManager")
+# BiocManager::install("dada2", version = "3.16", force = TRUE)
+
+library(ShortRead)
+# BiocManager::install("ShortRead", force = TRUE)
+
+library(Biostrings)
+# BiocManager::install("Biostrings", force = TRUE)
+
+library(FUNGuildR)
+# devtools::install_github("brendanf/FUNGuildR")
+
+library(decontam)
+# BiocManager::install("decontam")
+
+library(phangorn)
+
+library(DECIPHER)
+
+library(stringr)
+library(dplyr)
+library(janitor) # devtools::install_github("sfirke/janitor")
+library(data.table)
+library(readxl)
+
+# Check memory size that R can access
+# system('grep MemTotal /proc/meminfo')
+```
+
+# check the sample size 
+```{r}
+ITSseqno<-read.table("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/Dhami-Miseq-data/Analysis.Dhami/Demultiplexed2.ITS/ITS1.seq.number.sum.txt", sep = "/t")
+```
+
+# make manifest file for qiime itsxpress on Sherlock computer
+```{r}
+ITS1files<-list.files("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/Dhami-Miseq-data/Analysis.Dhami/Demultiplexed2.ITS/")
+
+# extract sample id
+ITS1sampleid<-gsub(".*nectar_survey__(.+)__ITS1F.reverse.fastq.gz.*", "\\1", ITS1files)
+ITS1sampleid<-ITS1sampleid[which(str_length(ITS1sampleid)<6)]
+length(ITS1sampleid) # 1108 names
+length(unique(ITS1sampleid)) # 1108 ITS1 samples
+
+# extract forward filepath 
+ITS1forward<-paste0("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/Dhami-Miseq-data/Analysis.Dhami/Demultiplexed2.ITS/nectar_survey__",ITS1sampleid,"__ITS1F.forward.fastq.gz")
+
+# extract reverse filepath
+ITS1reverse<-paste0("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/Dhami-Miseq-data/Analysis.Dhami/Demultiplexed2.ITS/nectar_survey__",ITS1sampleid,"__ITS1F.reverse.fastq.gz")
+  
+ITS1manifest.df<-cbind(ITS1sampleid, ITS1forward,ITS1reverse)
+colnames(ITS1manifest.df)<-c("sample-id",	"forward-absolute-filepath",	"reverse-absolute-filepath")
+
+# save ITS1manifest.txt
+# write.table(ITS1manifest.df, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/qiime/ITS1.Manifest.txt",row.names = F, sep = "\t")
+```
+
+# Read files 
+```{r}
+# set path (already cut the primers and barcodes)
+path.cut <- "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/Dhami-Miseq-data/Analysis.Dhami/Demultiplexed2.ITS/"  ## CHANGE ME to the directory containing the fastq files. # again, these fastq.gz files are not trimmed with itsxpress!
+list.files(path.cut)
+
+# parsing the strings
+cutFs  <- sort(list.files(path.cut, pattern = "__ITS1F.forward.fastq.gz", full.names = TRUE))
+cutRs  <- sort(list.files(path.cut, pattern = "__ITS1F.reverse.fastq.gz", full.names = TRUE))
+
+# Extract sample names, assuming filenames have format:
+get.sample.name <- function(fname) str_extract_all(fname,"(?<=nectar_survey__).+(?=__ITS1F.forward.fastq.gz)")[[1]][1]
+sample.names <- unname(sapply(cutFs, get.sample.name))
+head(sample.names)
+```
+
+# Inspect read quality profiles
+```{r}
+# Now we visualize the quality profile of the forward reads:
+# pdf(file = "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/forward_quality_test.pdf", width = 30, height = 30)
+plotQualityProfile(cutFs[1:10])
+# dev.off()
+
+# In gray-scale is a heat map of the frequency of each quality score at each base position. The mean quality score at each position is shown by the green line, and the quartiles of the quality score distribution by the orange lines. The red line shows the scaled proportion of reads that extend to at least that position (this is more useful for other sequencing technologies, as Illumina reads are typically all the same length, hence the flat red line).
+
+# for some samples, we see sharp drops of quality at 100bp
+
+# Now we visualize the quality profile of the reverse reads:
+# pdf(file = "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/reverse_quality_test.pdf", width = 30, height = 30)
+plotQualityProfile(cutRs[1:10])
+# dev.off()
+
+# for all samples, we see sharp drop of quality at 100bp
+```
+
+
+# Filter and trim
+```{r}
+#Assigning the filenames for the output of the filtered reads to be stored as fastq.gz files.
+
+filtFs <- file.path(path.cut, "filtered", basename(cutFs))
+filtRs <- file.path(path.cut, "filtered", basename(cutRs))
+
+#For this dataset, we will use standard filtering paraments: maxN=0 (DADA2 requires sequences contain no Ns), truncQ = 2, rm.phix = TRUE and maxEE=2. The maxEE parameter sets the maximum number of “expected errors” allowed in a read, which is a better filter than simply averaging quality scores. Note: We enforce a minLen here, to get rid of spurious very low-length sequences. This was not needed in the 16S Tutorial Workflow because truncLen already served that purpose.
+
+out <- filterAndTrim(cutFs, filtFs, cutRs, filtRs, maxN = 0, maxEE = c(2, 2), 
+    truncQ = 2, minLen = 100, rm.phix = TRUE, compress = TRUE,multithread= TRUE)  # on windows, set multithread = FALSE
+out[1:20,]
+# Some input samples had no reads pass the filter: JP13, JP19, JP81, JP84, MW45, SG53, SV28, SV70
+
+# The standard filtering parameters are starting points, not set in stone. If you want to speed up downstream computation, consider tightening maxEE. If too few reads are passing the filter, consider relaxing maxEE, perhaps especially on the reverse reads (eg. maxEE=c(2,5)), and reducing the truncLen to remove low quality tails. Remember though, when choosing truncLen for paired-end reads you must maintain overlap after truncation in order to merge them later.
+
+# pdf(file = "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/forward_quality_test_filtered.pdf", width = 30, height = 30)
+plotQualityProfile(filtFs[1:10])
+# dev.off()
+
+# pdf(file = "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/reverse_quality_test_filtered.pdf", width = 30, height = 30)
+plotQualityProfile(filtRs[1:10])
+# dev.off()
+```
+
+# Read the error rate
+```{r}
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+
+# pdf(file = "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/forward_errors.pdf", width = 4, height = 4)
+plotErrors(errF, nominalQ = TRUE)
+# dev.off()
+
+# pdf(file = "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/reverse_errors.pdf", width = 4, height = 4)
+plotErrors(errR, nominalQ = TRUE)
+# dev.off()
+```
+
+# Dereplicate identical reads
+```{r}
+# just check if the file exists after filtering, and only use ones that do (https://github.com/benjjneb/dada2/issues/711)
+
+exists <- file.exists(filtFs)
+
+derepFs <- derepFastq(filtFs[exists], verbose = TRUE)
+derepRs <- derepFastq(filtRs[exists], verbose = TRUE)
+# Name the derep-class objects by the sample names
+names(derepFs) <- sample.names[exists]
+names(derepRs) <- sample.names[exists]
+```
+
+# ASV Inference
+```{r}
+# At this step, the core sample inference algorithm is applied to the dereplicated data.
+# Here’s where DADA2 gets to do what it was born to do, that is to do its best to infer true biological sequences. It does this by incorporating the consensus quality profiles and abundances of each unique sequence, and then figuring out if each sequence is more likely to be of biological origin or more likely to be spurious.
+
+dadaFs <- dada(derepFs, err = errF, multithread = TRUE)
+dadaRs <- dada(derepRs, err = errR, multithread = TRUE)
+```
+
+# Merge paired reads
+```{r}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+```
+
+# Construct Sequence Table
+```{r}
+#We can now construct an amplicon sequence variant table (ASV) table, a higher-resolution version of the OTU table produced by traditional methods.
+
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+# 1100 3721
+# 1100 samples, 3721 ASVs
+saveRDS(seqtab, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/seqtab.rds")
+
+# check if the order of sample names is correct
+identical(names(derepFs),rownames(seqtab))
+
+```
+
+# Remove chimeras
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE,minFoldParentOverAbundance=8)
+#  Identified 41 bimeras out of 3721 input sequences.
+# saveRDS(seqtab.nochim,"/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/seqtab.nochim.rds")
+dim(seqtab.nochim) 
+# [1] 1100 3680
+
+# Inspect distribution of sequence lengths:
+table(nchar(getSequences(seqtab.nochim)))
+#147 149 197 200 201 205 206 211 213 214 216 217 218 219 220 221 222 223 224 225
+#  1   1   1   1   1   1   1   2   1   1   1   1   3   1   1   1  12  20  22  11
+#226 227 228 229 230 231 232 233 234 235 236 237 238 239 240 241 242 243 244 245
+# 22  62 105 596  98 145  80 100  80 156 134  64  38  62  35  49  34  67  39  27
+#246 247 248 249 250 251 252 253 254 255 256 257 258 259 260 261 262 263 264 265
+# 39  13  64  80  63  15  15  86  29  28  19  19  10   9  23  24  11  14  15  16
+#266 267 268 269 270 271 272 273 274 275 276 277 278 279 280 281 282 283 284 285
+# 22  32  18  78  12   8  43  51  33   8   8  11  32  15  31  16   2  21   1   5
+#286 287 288 289 290 291 292 293 294 295 296 297 298 299 300 301 302 303 304 305
+#  5  15  17  12  35  35  16  21   5   7  17  15   3   5   1   3   4   1   2   3
+#306 308 309 310 311 312 313 314 315 316 318 319 320 321 322 323 324 325 327 328
+#  3   1   5   7   1   8   3   2   1   5   4   3   3   1  12   5   3   2   1   1
+#329 330 331 333 334 338 340 341 342 343 344 345 346 347 348 349 351 352 354 355
+# 10   3   7   6   1   1   9   1  15   4   7   2   2   2   2   4   2   1   1   1
+#362 368 370 371 372 373 374 375 378 383 385 392 396 397 399 401 407 412 414 416
+#  3  29   1   9   1  23   2   1   1   2   9   1   2   1   1   2   4   1   1   1
+#427 432 433 434 436 440 442
+#  1   1   1   1   1   1   1
+
+# As expected, quite a bit of length variability in the the amplified ITS region.
+
+
+median((nchar(getSequences(seqtab.nochim))))
+# The median value of ITS length is 239 (notice that this is the length including the conserved regions of ITS)
+
+
+# giving our seq headers more manageable names (ASV_1, ASV_2...)
+all_asv_seqs <- colnames(seqtab.nochim)
+all_asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  all_asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+# making and writing out a fasta of our final ASV seqs:
+all_asv_fasta <- c(rbind(all_asv_headers, all_asv_seqs))
+# write(all_asv_fasta, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.all_ASVs.fa") # This file is then used in the species assignment step by CONSTAX
+```
+
+```{r} 
+# make a column for sum of sequences
+seqtab.nochim.reads_sample<-rowSums(seqtab.nochim)
+seqtab.nochim.reads_sample
+
+
+# save the sequence table with read numbers for fungi only 
+# write.csv(as.data.frame(seqtab.nochim.reads_sample), "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/seqtab.nochim.ITS_reads_per_sample.csv")
+
+
+```
+
+#Track reads through the pipeline
+```{r}
+# We now inspect the the number of reads that made it through each step in the pipeline to verify everything worked as expected.
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out[exists,], sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, 
+    getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace
+# sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", 
+    "nonchim")
+rownames(track) <- sample.names[exists]
+head(track)
+
+# to see the full table
+track
+
+# save The track table
+# write.csv(track, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/track_seq.csv")
+
+```
+
+#Assign taxonomy
+```{R using all eukaryotes UNITE database unpooled data}
+# Below I am importing the result of CONSTAX 
+taxa1 <- read.table("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/CONSTAX/CONSTAX_ITS1/conf50/taxonomy_assignements/constax_taxonomy.txt", sep = "\t",header = TRUE)
+dim(taxa1)
+#3680 8 
+
+# remove "_1" from all taxa names 
+taxa.clean<-apply(taxa1[,-1], 2, function(x) as.character(gsub("_1", "", x)))
+taxa1<-cbind(OTU_ID = taxa1$OTU_ID,taxa.clean)
+
+taxa.print1 <- taxa1  # Removing sequence rownames for display only
+rownames(taxa.print1) <- NULL 
+head(taxa.print1)
+
+# check the percentages for ITS2 from plants, animals, protists (Kingdom Viridiplantae,	Animalia, Protista)
+table(data.frame(taxa.print1)$Kingdom, useNA = "always")
+
+#                              Beauveria pseudobassiana
+#                        308                           3
+# Cadophora constrictospora            Choanoflagellozoa
+#                          3                           4
+#  Dematiosporium aquaticum                        Fungi
+#                          2                        3280
+#                    Metazoa Penicillium roseopurpureum
+#                          2                           1
+#                   Rhizaria                Stramenopila
+#                         25                           1
+#              Viridiplantae           Xenopus borealis
+#                         50                           1
+#                       <NA>
+#                          0
+
+# The rest of kingdoms are:
+# Choanoflagellozoa: Choanoflagellates are important consumers of bacteria.
+# Rhizaria: The Rhizaria are an ill-defined but species-rich supergroup of mostly unicellular[1] eukaryotes.[2] Except for the Chlorarachniophytes and three species in the genus Paulinella in the phylum Cercozoa, they are all non-photosynthethic, but many foraminifera and radiolaria have a symbiotic relationship with unicellular algae.
+# Viridiplantae: plants 
+# Metazoa: Metazoans (multicellular animals) appear to have evolved from single-celled ancestors that developed a colonial habit. The adaptive value of a multicellular way of life relates chiefly to increases in size and the specialization of cells for different functions.
+# Stramenopila
+
+# Look at relative abundance by reads of the kingdoms 
+seqtab.nochim<-as.data.frame(seqtab.nochim)
+# %fungi reads = number of fungi reads divided by number of total reads # 85.74851%
+sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="Fungi")]) / sum(colSums(seqtab.nochim))*100
+# %Choanoflagellates reads = 0.007966435%
+sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="Choanoflagellozoa")]) / sum(colSums(seqtab.nochim))*100 
+# %k__Rhizaria reads = 0.1314462%
+(sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="Rhizaria")]) / sum(colSums(seqtab.nochim)))*100 
+# % plant reads = 2.213699%
+(sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="Viridiplantae")]) / sum(colSums(seqtab.nochim)))*100 
+# % Metazoa reads = 0.01613714%
+(sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="Metazoa")]) / sum(colSums(seqtab.nochim)))*100 
+# % Stramenopila reads = 0.002246943%
+(sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="Stramenopila")]) / sum(colSums(seqtab.nochim)))*100 
+# % NA = 11.69779% 
+sum(colSums(seqtab.nochim)[which(taxa.print1[,2]=="")]) / sum(colSums(seqtab.nochim))*100
+```
+
+## Remove non-fungi sequences from the Sequence Table
+```{r unpooled data}
+taxa.print1 <- taxa1  
+
+# identify and remove the non-fungi sequences from the taxonomy 
+taxa1df<-as.data.frame(taxa1)
+fun.index<-which(taxa1df$Kingdom=="Fungi")
+
+length(fun.index)
+# [1] 3280 ASVs left that are strickly within the fungi ASVs 
+
+seqtab.nochim.fun<-as.data.frame(seqtab.nochim[,fun.index])
+dim(seqtab.nochim.fun)
+
+# update taxa.print1 by removing non-fungi sequences
+taxa.fun<-as.data.frame(taxa.print1[fun.index,])
+# Double check if the rest of the sequences are all fungi 
+table(taxa.fun$Kingdom,useNA ="always")
+# fungi     <NA>
+# 3280        0
+
+# Double check 
+
+# make a column for sum of sequences
+seqtab.nochim.fun.reads_sample<-rowSums(seqtab.nochim.fun)
+seqtab.nochim.reads_sample_unpooled<-data.frame(sample_ID = names(seqtab.nochim.reads_sample), Numb.total_reads = seqtab.nochim.reads_sample, Numb.fun_reads= seqtab.nochim.fun.reads_sample)
+
+#  write.csv(seqtab.nochim.reads_sample_unpooled,"/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/seqtab.nochim.ITS_reads_per_sample.csv")
+```
+
+## Extracting the standard goods from DADA2
+```{r}
+# The typical standard outputs from amplicon processing are a fasta file, a count table, and a taxonomy table. So here’s one way we can generate those files from your DADA2 objects in R:
+
+# giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim.fun)
+asv_headers <- vector(dim(seqtab.nochim.fun)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim.fun)[2]) {
+  asv_headers[i] <-paste0(">", taxa1df$OTU_ID[fun.index][i])
+}
+
+# making and writing out a fasta of our final ASV seqs:
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+# write(asv_fasta, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs.fa") 
+
+  # count table:
+asv_tab <- t(seqtab.nochim.fun)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+# write.table(asv_tab, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+  # tax table:
+  # creating table of taxonomy 
+rownames(taxa.fun)<-sub(">", "", asv_headers)
+# write.table(taxa.fun, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs_taxonomy.tsv", sep = "\t", quote=F, col.names=NA)
+
+# Check row names the same 
+identical(gsub(">","",asv_headers), rownames(asv_tab))
+identical(row.names(asv_tab), rownames(taxa.fun))
+```
+
+## Removing likely contaminants
+```{r}
+colnames(asv_tab) # The samples with N are negative controls 
+colnames(asv_tab) [which(colnames(asv_tab) %like% "N")]
+
+vector_for_decontam <-rep(TRUE, ncol(asv_tab))
+vector_for_decontam[which(colnames(asv_tab) %like% "N")]<-rep(FALSE, length(which(colnames(asv_tab) %like% "N")))
+vector_for_decontam[which(colnames(asv_tab) %like% "N")]# DOUBLE check that these will be  FALSE
+
+contam_df <- isContaminant(t(asv_tab), neg=vector_for_decontam, method ="prevalence")
+
+table(contam_df$contaminant) # identified 0 as contaminants
+
+  ## don't worry if the numbers vary a little, this might happen due to different versions being used 
+  ## from when this was initially put together
+
+  # getting vector holding the identified contaminant IDs
+contam_asvs <- row.names(contam_df[contam_df$contaminant == TRUE, ])
+
+# look at some contaminants 
+taxa.fun[row.names(taxa.fun) %in% contam_asvs, ]
+
+# And now, here is one way to remove them from our 3 primary outputs and create new files (back in R):
+  # making new fasta file
+contam_indices <- which(asv_fasta %in% paste0(">", contam_asvs))
+# dont_want <- sort(c(contam_indices, contam_indices + 1)) # 0 
+asv_fasta_no_contam <- asv_fasta
+
+  # making new count table
+asv_tab_no_contam <- asv_tab[!row.names(asv_tab) %in% contam_asvs, ]
+dim(asv_tab_no_contam)
+# [1]3280 1100
+# remove Negative controls 
+asv_tab_no_contam_samples<-asv_tab_no_contam[,-which(colnames(asv_tab_no_contam)%like%"N")]
+dim(asv_tab_no_contam_samples)
+# [1]3280 1022
+
+  # making new taxonomy table
+taxa.fun_no_contam <- taxa.fun[!row.names(taxa.fun) %in% contam_asvs, ]
+dim(taxa.fun_no_contam) # 3280  8
+identical(rownames(taxa.fun_no_contam) ,rownames(asv_tab_no_contam_samples))
+
+# write(asv_fasta_no_contam, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs.fa")
+# write.table(asv_tab_no_contam_samples, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+# write.table(taxa.fun_no_contam, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/unpooled.ASVs_taxonomy.tsv", sep = "\t", quote=F, col.names=NA)
+```
+
+## sumarize the percentage of identified fungi genera, and species 
+```{r}
+# percentage of fungi reads identified to genus level
+length(which(taxa.fun_no_contam$Genus!="" ))/nrow(taxa.fun_no_contam)*100 # 70.18293
+
+# percentage of fungi reads identified to species level
+length(which(taxa.fun_no_contam$Species!=""  ))/nrow(taxa.fun_no_contam)*100 # 22.9878
+```
+
+## Find the most common fungi species and genera
+```{r}
+# By ASVs find 20 top abundant ones 
+ASV.count.df<-data.frame(ASVno = rownames(asv_tab_no_contam_samples),totalcount = rowSums(asv_tab_no_contam_samples))
+ASV.count.df$Rel.abun<-(ASV.count.df$totalcount/sum(ASV.count.df$totalcount))*100
+# find taxonomy 
+taxa.taxonomy<-paste0(taxa.fun_no_contam$Kingdom,";",taxa.fun_no_contam$Phylum,";",taxa.fun_no_contam$Class,";",taxa.fun_no_contam$Order,";",taxa.fun_no_contam$Family,";",taxa.fun_no_contam$Genus,";",taxa.fun_no_contam$Species)
+identical(rownames(taxa.fun_no_contam),ASV.count.df$ASVno)
+ASV.count.df$taxonomy<-taxa.taxonomy
+ASV.count.df$Genera<-paste0(taxa.fun_no_contam$Kingdom,";",taxa.fun_no_contam$Phylum,";",taxa.fun_no_contam$Class,";",taxa.fun_no_contam$Order,";",taxa.fun_no_contam$Family,";",taxa.fun_no_contam$Genus)
+
+# reorder according to relative abundance 
+ASV.count.df <- ASV.count.df[order(-ASV.count.df$totalcount),]
+ASV.count.df[1:20,] # top20
+# save 
+# write.csv(ASV.count.df, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/ASV.count.ordered.csv")
+
+# By Species (same species names multiple ASVs are clumped together in one species)
+# find top 20 most common species 
+taxonomy.count.df<-data.frame(ASV.count.df %>% group_by(taxonomy) %>% summarize(sum(totalcount),sum(Rel.abun)))
+colnames(taxonomy.count.df)<-c("taxonomy","totalcount","totalperc")
+taxonomy.count.df2<-taxonomy.count.df[order(-taxonomy.count.df$totalcount),] # reorder from the most common one 
+# save 
+# write.csv(taxonomy.count.df2, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/species.count.ordered.csv")
+
+# By genera 
+# find top 20 most common genera 
+genera.count.df<-data.frame(ASV.count.df%>% group_by(Genera) %>% summarize(sum(totalcount),sum(Rel.abun)))
+colnames(genera.count.df)<-c("genera","totalcount","totalperc")
+genera.count.df2<-genera.count.df[order(-genera.count.df$totalcount),] # reorder from the most common one 
+# save 
+# write.csv(genera.count.df2, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/genera.count.ordered.csv")
+```
+
+## create metadata table for ITS sequences
+```{r}
+# read meta datasheet
+metadf<-read.csv("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/metadata/sampling_sheet_regional_survey_2015_final_corrected.csv")
+
+fieldsite<-read.csv("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/01_Data/metadata/2015_survey_siteinfo_location_envi.csv")
+
+colnames(asv_tab_no_contam_samples)
+
+# select ITS samples 
+meta_ITS<-metadf[match(colnames(asv_tab_no_contam_samples),metadf$sample_ID),]
+identical(meta_ITS$sample_ID , colnames(asv_tab_no_contam_samples))
+
+# left join with environmental data 
+meta_ITS<-left_join(meta_ITS, fieldsite, by = "Plant_ID")
+rownames(meta_ITS)<-meta_ITS$sample_ID
+
+# save the ITS meta data 
+write.csv(meta_ITS, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/metaITS.csv")
+```
+
+# Make phylogentic tree based on fasta file
+See method: https://bioconductor.org/help/course-materials/2017/BioC2017/Day1/Workshops/Microbiome/MicrobiomeWorkflowII.html
+```{r}
+seqs <- asv_fasta_no_contam[-which(asv_fasta_no_contam%like%">")]
+names(seqs) <- seqs # This propagates to the tip labels of the tree
+alignment <- AlignSeqs(DNAStringSet(seqs), anchor=NA,verbose=FALSE)
+
+# The phangorn R package is then used to construct a phylogenetic tree. Here we first construct a neighbor-joining tree, and then fit a GTR+G+I (Generalized time-reversible with Gamma rate variation) maximum likelihood tree using the neighbor-joining tree as a starting point.
+
+phangAlign <- phyDat(as(alignment, "matrix"), type="DNA")
+dm <- dist.ml(phangAlign)
+treeNJ <- NJ(dm) # Note, tip order != sequence order
+fit = pml(treeNJ, data=phangAlign)
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+        rearrangement = "stochastic", control = pml.control(trace = 0))
+
+# save the phylogenetic objects
+saveRDS(treeNJ, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/treeNJ.rds")
+saveRDS(fitGTR, "/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/fitGTR.rds")
+
+```
+
+# save R image
+# save.image("/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/20230124_ITS1_DADA2_CONSTAXtaxa.rdata")
+
+# to download to local computer
+$ cd c:/Users/Amanda/Desktop/jobs/Stanford/Mimulus_microbes/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/
+$ rsync -rltvPh ytwu@login.sherlock.stanford.edu:/home/groups/fukamit/ytwu/Wu_mimulus_analysis2022/02_Analysis/dada2/dada2_ITS1/unpooled_CONSTAX/ .
