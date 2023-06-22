@@ -4,7 +4,11 @@ The repository is comprised of 4 folders:
 
 **01_Data** folder includes two CSV files:
 > 1) "sampling_sheet_regional_survey_2015_final_corrected.csv": metadata for the DNA samples, documenting the site ID, plant ID, flower ID of each sample, as well as the corresponding concentration of fungi and bacteria unit forming colonies (CFUs) in each sample.
-> 2) "2015_survey_siteinfo_location_envi.csv": documents the environmental data and coordinates for each flower. 
+> 2) "2015_survey_siteinfo_location_envi.csv": documents the environmental data and coordinates for each flower.
+> 3) "Wu_Metagenome.environmental.1.0_B_N_SUB13559541.xlsx": documents the biosample information for each flower for sample names started from B to N
+> 4) "Wu_Metagenome.environmental.1.0_O_S_SUB13567828.xlsx": documents the biosample information for each flower for sample names started from O to S
+> 5) "SRA_metadata_site_started_with_B_N.xlsx": documents the sequencing information for each fastq file, as related to the biosample info in "Wu_Metagenome.environmental.1.0_B_N_SUB13559541.xlsx".
+> 6) "SRA_metadata_site_started_with_O_S.xlsx": documents the sequencing information for each fastq file, as related to the biosample info in "Wu_Metagenome.environmental.1.0_O_S_SUB13567828.xlsx".
 
 **02_Rscripts** includes R script used in the bioinformatics analyses: 
 > 1) "make_Map_20230413.Rmd": R code that makes the Figure 1 map, showing the distributions and locations of samples.
